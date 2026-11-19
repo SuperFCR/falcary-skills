@@ -12,10 +12,10 @@
 
 ## 发布验证（2026-10-27）
 
-- 仓库已发布为 [SuperFCR/PocketRig](https://github.com/SuperFCR/PocketRig)，包含虚构界面重建的手机 / Mac 短片；原始截图和私人部署记录未入库。
+- 仓库已发布为 SuperFCR/PocketRig，包含虚构界面重建的手机 / Mac 短片；原始截图和私人部署记录未入库。
 - 初次 macOS CI 暴露了 Shell 变量紧邻中文标点时的输出编码问题；使用 `${变量}` 明确边界后修复，保留严格 UTF-8 解码，并补充缺少 Node 与组权限拒绝的回归检查。
-- 17 项检查在 Ubuntu 与 macOS CI 上全部通过；ShellCheck / Python 语法和 Windows PowerShell 解析也通过。对应代码提交为 `9aff302`，见[成功运行记录](https://github.com/SuperFCR/PocketRig/actions/runs/40468792764)。
-- 后续提交的状态以 [GitHub Actions](https://github.com/SuperFCR/PocketRig/actions) 为准。CI 使用模拟用户、模拟下载与临时目录，不代表系统部署或真实网络验收。
+- 17 项检查在 Ubuntu 与 macOS CI 上全部通过；ShellCheck / Python 语法和 Windows PowerShell 解析也通过。对应代码提交为 `9aff302`，见成功运行记录。
+- 后续提交的状态以 GitHub Actions 为准。CI 使用模拟用户、模拟下载与临时目录，不代表系统部署或真实网络验收。
 - [Shadowrocket 内置 Tailscale 教程](ios-shadowrocket.md)已核对官方发布说明与相关文档，并于 2026-10-27 在 iPhone 实机完成入网与 Paseo 连接验证。
 
 ## 更名（2026-10-28）
@@ -75,6 +75,7 @@ GitHub Actions 配置了 Ubuntu 的 ShellCheck、Ubuntu/macOS 的上述检查，
 
 ## 并入 falcary-skills（2026-11-19）
 
-- 项目自 `SuperFCR/PocketRig` 的提交 `2ae9eb9` 并入 [SuperFCR/falcary-skills](https://github.com/SuperFCR/falcary-skills) 的 `pocketrig/` 目录。安装说明与插件清单中的仓库地址相应更新；宣传片、演示页和架构图里的旧地址保持原样。
+- 项目自 `SuperFCR/PocketRig` 的提交 `2ae9eb9` 并入 [SuperFCR/falcary-skills](https://github.com/SuperFCR/falcary-skills) 的 `pocketrig/` 目录，安装说明、插件清单、演示页与架构图中的仓库地址相应更新。独立仓库 `SuperFCR/PocketRig`（及旧名 `SuperFCR/Paseo-Desk`）随后停用，上文指向它的链接已改为纯文本，当时的 CI 运行记录不再可查。
+- 宣传片与亮点动图尚未重新渲染，“搭起来只要三步”和结尾两处画面仍显示旧地址；宣传片源码未改。
 - 仓库根目录新增插件市场清单，插件来源为 `./pocketrig`；`claude plugin validate .` 与 `claude plugin validate pocketrig` 通过（Claude Code 2.1.322）。
-- 22 项 Python 检查在 Linux 本地全部通过，脚本通过 `bash -n` 语法检查；本地未运行 ShellCheck 与 PowerShell 解析。CI 改由 falcary-skills 的 [pocketrig 工作流](https://github.com/SuperFCR/falcary-skills/actions/workflows/pocketrig.yml)运行，后续状态以其为准。
+- 22 项 Python 检查在 Linux 本地全部通过，脚本通过 `bash -n` 语法检查。CI 改由 falcary-skills 的 [pocketrig 工作流](https://github.com/SuperFCR/falcary-skills/actions/workflows/pocketrig.yml)运行：并入提交 `75292cc` 上，Ubuntu 与 macOS 冒烟测试、ShellCheck / Python 语法、Windows PowerShell 解析全部通过。后续状态以该工作流为准。

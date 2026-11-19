@@ -130,7 +130,7 @@ Reference versions: Paseo 0.13.2, Node 24, Codex 0.164, Claude Code 2.1.308, Win
 
 ## Name
 
-This project was formerly called Paseo Desk and was renamed PocketRig on 2026-10-28; the old `SuperFCR/Paseo-Desk` address redirects to the new repository. System install paths and service names (`paseo-user`, `paseo@<user>`, `/etc/paseo-workstation`) are unchanged, so existing workstations need no migration. On 2026-11-19 the project joined the [falcary-skills](https://github.com/SuperFCR/falcary-skills) collection as `pocketrig/`; the standalone `SuperFCR/PocketRig` repository keeps the earlier history.
+This project was formerly called Paseo Desk and was renamed PocketRig on 2026-10-28. System install paths and service names (`paseo-user`, `paseo@<user>`, `/etc/paseo-workstation`) are unchanged, so existing workstations need no migration. Since 2026-11-19 the project lives in the [falcary-skills](https://github.com/SuperFCR/falcary-skills) collection as `pocketrig/`. The earlier standalone repositories `SuperFCR/Paseo-Desk` and `SuperFCR/PocketRig` have been retired; a plugin installed from either should be reinstalled from `SuperFCR/falcary-skills`.
 
 ## License
 

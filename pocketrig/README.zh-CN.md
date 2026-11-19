@@ -128,7 +128,7 @@ tests/                 不依赖真实用户、服务或模型的安装、运行
 
 ## 名称
 
-项目原名 Paseo Desk，2026-10-28 更名为 PocketRig；旧地址 `SuperFCR/Paseo-Desk` 会自动跳转到新仓库。系统安装路径与服务名（`paseo-user`、`paseo@<user>`、`/etc/paseo-workstation`）保持不变，已部署的工作站无需迁移。2026-11-19 起项目并入 [falcary-skills](https://github.com/SuperFCR/falcary-skills) 合集，位于 `pocketrig/`；独立仓库 `SuperFCR/PocketRig` 保留此前的历史。
+项目原名 Paseo Desk，2026-10-28 更名为 PocketRig。系统安装路径与服务名（`paseo-user`、`paseo@<user>`、`/etc/paseo-workstation`）保持不变，已部署的工作站无需迁移。2026-11-19 起项目并入 [falcary-skills](https://github.com/SuperFCR/falcary-skills) 合集，位于 `pocketrig/`。此前的独立仓库 `SuperFCR/Paseo-Desk` 与 `SuperFCR/PocketRig` 已停用；从旧地址安装的插件请改从 `SuperFCR/falcary-skills` 重新安装。
 
 ## 许可证
 
