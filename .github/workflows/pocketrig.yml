@@ -1,0 +1,59 @@
+name: pocketrig
+on:
+  push:
+    paths: ['pocketrig/**', '.github/workflows/pocketrig.yml']
+  pull_request:
+    paths: ['pocketrig/**', '.github/workflows/pocketrig.yml']
+defaults:
+  run:
+    working-directory: pocketrig
+jobs:
+  shell-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: |
+          shellcheck -x linux/install.sh linux/bin/* linux/libexec/env.sh linux/libexec/paseo-daemon \
+            linux/sbin/paseo-workstation-keepalive linux/share/sync-agent-policy.sh \
+            optional/egress-proxy/install.sh optional/egress-proxy/sbin/* skills/install.sh
+      - name: python
+        run: python3 -m py_compile linux/sbin/paseo-user
+  smoke:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: isolated installer and runtime checks
+        run: |
+          python3 - <<'PY'
+          import sys
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover('tests')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          # Make failure details visible in public checks, even without log access.
+          for test, traceback in result.failures + result.errors:
+              message = f'{test}\n{traceback}'
+              message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error title=Smoke test failure::{message}', flush=True)
+          sys.exit(not result.wasSuccessful())
+          PY
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: parse
+        shell: powershell
+        run: |
+          $failed = $false
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $failed = $true; $errors | ForEach-Object { Write-Error "$($_.Extent.File):$($_.Extent.StartLineNumber) $($_.Message)" } }
+          }
+          if ($failed) { exit 1 }

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "falcary-skills",
+  "owner": {
+    "name": "SuperFCR"
+  },
+  "metadata": {
+    "description": "falcary 的 agent skill 合集；可作为插件安装的有 pocketrig"
+  },
+  "plugins": [
+    {
+      "name": "pocketrig",
+      "source": "./pocketrig",
+      "description": "安装、常驻、连接、远程计算、诊断与多人扩展六个 skill",
+      "version": "1.0.0"
+    }
+  ]
+}
