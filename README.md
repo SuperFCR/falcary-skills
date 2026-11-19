@@ -18,6 +18,10 @@ python3 scripts/install.py --link-skill claude --link-cli
 
 See [overleaf-ctl/README.md](overleaf-ctl/README.md) ([简体中文](overleaf-ctl/README.zh-CN.md)) for requirements and usage.
 
+## License
+
+[MIT](LICENSE), for every skill in this repository unless its folder says otherwise.
+
 ---
 
 falcary 的 agent skill 合集。每个顶层文件夹是一个独立的 skill，自带 `SKILL.md` 和 README；安装与用法见各 skill 目录。

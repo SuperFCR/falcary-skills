@@ -8,7 +8,7 @@ version = "1.1.0"
 description = "Local VSCode + git two-way sync + local LaTeX compile controller for Overleaf"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LEGAL.md" }
+license = { text = "MIT" }
 authors = [{ name = "falcary" }]
 dependencies = [
     "click>=8.2",

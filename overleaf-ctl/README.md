@@ -121,3 +121,7 @@ Version 1.1.0 passed **290 tests** on Linux (WSL2, Python 3.12), including a fre
 ## Sources
 
 The records, evidence, and chapter-review workflow draws on [research-writing-skill](https://github.com/Norman-bury/research-writing-skill), adapted for existing TeX projects. Contribution-focused prose draws on [anti-defensive-writing-en](https://github.com/Adkid-Zephyr/anti-defensive-writing-Skill/blob/main/skills/anti-defensive-writing-en/SKILL.md), retaining material adverse results, uncertainty, and scope limits. Its [MIT license](writings/references/anti-defensive-LICENSE.txt) is included. Neither upstream skill is installed by this package.
+
+## License
+
+[MIT](LICENSE). `LEGAL.md` only states which language of the code comments governs.

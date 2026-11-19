@@ -2,7 +2,7 @@
   "name": "overleaf-ctl",
   "version": "1.1.0",
   "description": "Overleaf tools and evidence-driven LaTeX writing skills with guarded Git publication.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "private": true,
   "bin": {
     "overleaf-ctl": "bin/overleaf-ctl.js",
@@ -15,6 +15,7 @@
     "README.zh-CN.md",
     "SKILL.md",
     "LEGAL.md",
+    "LICENSE",
     "pyproject.toml",
     "requirements.txt",
     "setup.sh",

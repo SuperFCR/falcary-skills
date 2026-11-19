@@ -123,3 +123,7 @@ npm pack --dry-run
 ## 参考来源
 
 档案、证据与分章审查流程参考 [research-writing-skill](https://github.com/Norman-bury/research-writing-skill)，按现有 TeX 项目需求适配。贡献导向表达参考 [anti-defensive-writing-en](https://github.com/Adkid-Zephyr/anti-defensive-writing-Skill/blob/main/skills/anti-defensive-writing-en/SKILL.md)，保留重要不利结果、不确定性与结论边界，并附上游 [MIT 许可](writings/references/anti-defensive-LICENSE.txt)。本包不会安装这两个上游技能。
+
+## 许可
+
+[MIT](LICENSE)。`LEGAL.md` 仅说明代码注释以哪种语言为准。
