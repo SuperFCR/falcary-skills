@@ -4,7 +4,7 @@
 
 **口袋里的工作站**。用手机驱动家里那台常开的电脑写代码：工作站 24 小时在线，GPU 节点上的实验结果在手机上直接看。
 
-把一台常开的电脑（Windows + WSL2、原生 Linux 或 macOS）变成自己的 AI 编程工位：手机和 Mac 经 [Tailscale](https://tailscale.com) 连到工作站上**自己的** [Paseo](https://paseo.sh) 实例，驱动 Claude Code / Codex 写代码；训练、推理等重计算通过 SSH 提交到 GPU / 计算节点，跑完把小结果拉回工作站，手机打开就能看。先从一个人用起，需要时再扩展给家人或小团队。
+把一台常开的电脑（原生 Linux、macOS，或经 WSL2 的 Windows）变成自己的 AI 编程工位：手机和 Mac 经 [Tailscale](https://tailscale.com)（工作站在公司内网时也可以直接用公司 VPN）连到工作站上**自己的** [Paseo](https://paseo.sh) 实例，驱动 Claude Code / Codex 写代码；训练、推理等重计算通过 SSH 提交到 GPU / 计算节点，跑完把小结果拉回工作站，手机打开就能看。先从一个人用起，需要时再扩展给家人或小团队。
 
 ## 4 分钟看懂
 
@@ -43,7 +43,7 @@
 
 ```text
 手机 / Mac（Paseo 客户端或网页）
-        │ Tailscale 私有网络：不开放公网端口，只放行自己的设备
+        │ Tailscale 私有网络（或公司 VPN）：不开放公网端口
 常开工作站：本人 Paseo 实例（systemd / launchd 托管，24 小时在线）
         │ 以本人 UID 运行 Claude Code / Codex（公共安装，经包装脚本启动）
         │ 本人 ~/.ssh 配置
@@ -63,7 +63,7 @@ GPU / 计算节点：数据、模型、训练与完整产物；只把小结果�
    claude auth login && codex login                                    # 登录你自己的账号
    ```
 2. 保持常驻：WSL 部署在 Windows 侧注册常驻任务（同时维护 Tailscale 入口转发），见[管理员部署指南](docs/admin-guide.md)第 3 节；原生 Linux / macOS 让 Paseo 监听本机 Tailscale 地址。
-3. 手机和 Mac 登录 Tailscale，在 Paseo 中添加 Host（`<WS_IP>:6767`，Use SSL 关闭，密码在 `~/.paseo/client.env`），按[使用教程](docs/user-guide.md)完成第一个任务。
+3. 手机和 Mac 登录 Tailscale（或连上公司 VPN，见[平台文档](docs/platforms.md)第四节），在 Paseo 中添加 Host（`<WS_IP>:6767`，Use SSL 关闭，密码在 `~/.paseo/client.env`），按[使用教程](docs/user-guide.md)完成第一个任务。
 4. 计算节点：在本人 `~/.ssh/config` 配好节点，用 [remote-compute](skills/remote-compute/SKILL.md) 提交任务、把结果拉回给手机看。
 
 上线前按[验收清单](docs/acceptance-checklist.md)逐项确认。

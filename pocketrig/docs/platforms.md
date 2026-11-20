@@ -1,6 +1,6 @@
 # 按宿主平台部署
 
-工作站（中继入口）可以是三种宿主之一。成员侧的使用方式完全相同：连 Tailscale → 打开本人 Paseo 端口 → SSH 到计算节点。差别只在管理员侧：用户如何创建、实例由谁托管、Tailscale 入口如何进入 Paseo。
+工作站（中继入口）可以是三种宿主之一。成员侧的使用方式完全相同：连 Tailscale → 打开本人 Paseo 端口 → SSH 到计算节点。工作站在公司内网时，也可以用公司 VPN 代替 Tailscale，见[第四节](#四用公司-vpn-代替-tailscale)。差别只在管理员侧：用户如何创建、实例由谁托管、Tailscale 入口如何进入 Paseo。
 
 | | Windows + WSL2 | 原生 Linux | macOS |
 | --- | --- | --- | --- |
@@ -235,6 +235,70 @@ sudo launchctl print "system/sh.paseo.workstation.$U" | grep -E 'state|pid'
 - 实例进程属于成员本人：`ps -o user= -p <pid>`；
 - 冷启动后无人登录时，SSH 和全部 Paseo 端口都可以访问；
 - 长时间空闲后仍可连接；FileVault 解锁、笔记本合盖、电源恢复按实际设备分别记录结果。
+
+---
+
+## 四、用公司 VPN 代替 Tailscale
+
+工作站放在公司内网、手机和笔记本本来就能通过公司 VPN 进入这个内网时，可以不装 Tailscale：Paseo 直接监听工作站的内网地址，设备连上公司 VPN 后访问它。其余部分（公共安装、每人独立实例、包装脚本、计算节点 SSH）不变。
+
+> 这条路线由现有配置项支持，尚未实机验收；部署后按本节末尾的验收项逐条确认。
+
+### 1. 先确认
+
+| 项 | 说明 |
+| --- | --- |
+| 公司政策 | 允许在这台机器上长期运行服务并开放端口；不确定就先问 IT |
+| 内网地址 `<LAN_IP>` | 工作站在公司内网的 IPv4 地址，最好请 IT 固定（静态地址或 DHCP 保留） |
+| VPN 网段 `<VPN_CIDR>` | VPN 客户端拿到的地址范围，例如 `10.8.0.0/16`，向 IT 确认 |
+| 可达性 | 手机连上公司 VPN 后，能访问 `<LAN_IP>` 的端口（有的 VPN 只放行部分网段或端口） |
+
+### 2. 让实例监听内网地址
+
+原生 Linux：编辑 `/etc/paseo-workstation/workstation.conf`，然后为每位成员执行一次 `paseo-user add`（已有成员重新执行即可，连接密码保持不变，服务会自动重启）：
+
+```bash
+PW_LISTEN_HOST=<LAN_IP>
+```
+
+```bash
+sudo paseo-user add alice 6767
+```
+
+macOS：第三节里的 `daemon.listen` 和 launchd 的 `__LISTEN__` 都写成 `<LAN_IP>:6767`。
+
+**不要**改成监听 `0.0.0.0`：那样实例会出现在工作站的所有网卡上，包括可能存在的公网或访客网络。
+
+### 3. 用主机防火墙代替按人授权
+
+Tailscale 可以按人放行端口，公司 VPN 通常做不到：同一个 VPN 里的所有同事都能连到这个地址。所以 Paseo 密码成了主要门槛，并且建议在工作站上只放行 VPN 网段：
+
+```bash
+# ufw
+sudo ufw allow from <VPN_CIDR> to any port 6767 proto tcp
+# firewalld
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="<VPN_CIDR>" port port="6767" protocol="tcp" accept'
+sudo firewall-cmd --reload
+```
+
+SSH 端口同样只放行 VPN 网段。macOS 自带的应用防火墙按程序而不是网段过滤，需要按网段限制时请 IT 在网络侧处理，或自行配置 pf。
+
+### 4. 客户端
+
+- 手机和笔记本先连公司 VPN，再在 Paseo 中添加 Host：`<LAN_IP>` / 本人端口，密码同前。
+- Use SSL 仍保持关闭。注意加密范围的变化：公司 VPN 只加密设备到公司网络这一段，公司内网里的这一段没有额外加密，安全程度取决于内网本身。对此有顾虑时继续使用 Tailscale。
+- 成员不需要安装 Tailscale，交付单里把 Tailscale 相关项换成「公司 VPN + `<LAN_IP>`」。
+
+### 5. WSL2 上的限制
+
+Windows 侧的同步脚本（`windows/`）只读取 Tailscale 地址，不会为内网地址建立转发。WSL2 部署想走公司 VPN，需要自己在 Windows 上建 `netsh interface portproxy`（`<Windows 内网 IP>:6767 → 127.0.0.1:6767`）和只放行 VPN 网段的防火墙规则；常驻任务在未安装 Tailscale 时的行为也未验证。建议这条路线优先用在原生 Linux 或 macOS 上。
+
+### 6. 验收
+
+- 手机连上公司 VPN 后能打开本人 Paseo，并完成[首个任务与接续验证](../skills/pocketrig-connect/SKILL.md)；
+- 断开 VPN 后连不上；
+- 用另一台不在 VPN 网段的内网机器访问端口，应被防火墙拒绝；
+- 工作站重启、内网地址续租后仍能访问（地址变了要改 `PW_LISTEN_HOST` 并重新执行 `paseo-user add`）。
 
 ## 参考
 

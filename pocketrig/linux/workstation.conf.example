@@ -18,7 +18,8 @@ PW_CODEX_BIN=/usr/local/lib/codex-shared/node_modules/.bin/codex
 PW_GROUP=ai-cli-users
 
 # Paseo 监听地址。WSL + Windows Tailscale 用 127.0.0.1（由 Windows portproxy 转入）；
-# 原生 Linux / macOS 可改成本机 Tailscale 地址（100.x.y.z），见 docs/platforms.md
+# 原生 Linux / macOS 可改成本机 Tailscale 地址（100.x.y.z），见 docs/platforms.md 第二节；
+# 工作站在公司内网、设备走公司 VPN 时写工作站的内网地址，见 docs/platforms.md 第四节。不要写 0.0.0.0
 PW_LISTEN_HOST=127.0.0.1
 
 # 维护 AllowUsers 白名单的 sshd 配置片段；文件不存在或没有 AllowUsers 行时跳过

@@ -4,7 +4,7 @@
 
 **Your workstation, in your pocket.** Drive the always-on computer at home from your phone: the workstation stays online 24/7, and experiment results from your GPU nodes show up right on your phone.
 
-PocketRig turns one always-on computer (Windows + WSL2, native Linux, or macOS) into your personal AI coding rig. Your phone and Mac connect over [Tailscale](https://tailscale.com) to **your own** [Paseo](https://paseo.sh) instance on the workstation, which drives Claude Code / Codex. Heavy work such as training and inference is submitted over SSH to GPU / compute nodes; when a job finishes, only small results come back to the workstation, ready to view on your phone. Start with just yourself, and extend it to family or a small team when you need to.
+PocketRig turns one always-on computer (native Linux, macOS, or Windows through WSL2) into your personal AI coding rig. Your phone and Mac connect over [Tailscale](https://tailscale.com), or over your company VPN when the workstation sits on a corporate network, to **your own** [Paseo](https://paseo.sh) instance on the workstation, which drives Claude Code / Codex. Heavy work such as training and inference is submitted over SSH to GPU / compute nodes; when a job finishes, only small results come back to the workstation, ready to view on your phone. Start with just yourself, and extend it to family or a small team when you need to.
 
 ## See it in 4 minutes
 
@@ -45,7 +45,7 @@ The skills and detailed docs are currently written in Chinese; agents can follow
 
 ```text
 Phone / Mac (Paseo app or web)
-        │ Tailscale private network: no public ports, only your own devices
+        │ Tailscale private network (or company VPN): no public ports
 Always-on workstation: your Paseo instance (systemd / launchd, online 24/7)
         │ runs Claude Code / Codex as your UID (shared install, via wrapper scripts)
         │ your own ~/.ssh config
@@ -65,7 +65,7 @@ Prefer not to do it by hand? Install the plugin above and let the agent run `poc
    claude auth login && codex login                                    # sign in with your own accounts
    ```
 2. Keep it running: on WSL, register the keep-alive task on the Windows side (it also maintains the Tailscale port forwarding), see section 3 of the [admin guide](docs/admin-guide.md); on native Linux / macOS, let Paseo listen on the local Tailscale address.
-3. Sign in to Tailscale on your phone and Mac, add a host in Paseo (`<WS_IP>:6767`, Use SSL off, password in `~/.paseo/client.env`), and complete your first task with the [user guide](docs/user-guide.md).
+3. Sign in to Tailscale (or connect the company VPN, see section 4 of the [platform guide](docs/platforms.md)) on your phone and Mac, add a host in Paseo (`<WS_IP>:6767`, Use SSL off, password in `~/.paseo/client.env`), and complete your first task with the [user guide](docs/user-guide.md).
 4. Compute nodes: configure them in your own `~/.ssh/config`, then use [remote-compute](skills/remote-compute/SKILL.md) to submit jobs and bring results back to your phone.
 
 Before relying on it, go through the [acceptance checklist](docs/acceptance-checklist.md).

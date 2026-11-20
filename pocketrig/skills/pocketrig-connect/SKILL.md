@@ -1,6 +1,6 @@
 ---
 name: pocketrig-connect
-description: 让自己的手机（iPhone / Android）和 Mac / 笔记本通过 Tailscale 连到工作站上的本人 Paseo 实例：Tailscale 入网与授权、Paseo 客户端添加 Host、首个任务验证。用户说“手机怎么连工作站”“Paseo 添加 Host”“Tailscale 授权端口”“iPhone 用 Shadowrocket 连”“Mac 接着手机的会话继续”时使用。
+description: 让自己的手机（iPhone / Android）和 Mac / 笔记本通过 Tailscale（或公司 VPN）连到工作站上的本人 Paseo 实例：Tailscale 入网与授权、Paseo 客户端添加 Host、首个任务验证。用户说“手机怎么连工作站”“Paseo 添加 Host”“Tailscale 授权端口”“iPhone 用 Shadowrocket 连”“Mac 接着手机的会话继续”“公司电脑用公司 VPN 连”时使用。
 ---
 
 # pocketrig-connect：手机与 Mac 连进来
@@ -11,11 +11,14 @@ description: 让自己的手机（iPhone / Android）和 Mac / 笔记本通过 T
 手机 / Mac → Tailscale（私有网络）→ 工作站 <WS_IP>:<端口> → 本人 Paseo 实例
 ```
 
+工作站在公司内网、设备能连公司 VPN 时，可以不用 Tailscale：`<WS_IP>` 换成工作站内网地址，第 2 步的 Tailscale 授权换成主机防火墙。完整步骤与安全差异见[平台文档第四节](../../docs/platforms.md#四用公司-vpn-代替-tailscale)，开始前先和用户确认走哪种网络、公司政策是否允许。
+
 ## 先确认
 
 | 项 | 来源 |
 | --- | --- |
-| 工作站 Tailscale 地址 `<WS_IP>` | 工作站 `tailscale ip -4`（WSL 部署在 Windows 侧执行） |
+| 网络 | Tailscale，还是公司 VPN |
+| 工作站地址 `<WS_IP>` | Tailscale：工作站 `tailscale ip -4`（WSL 部署在 Windows 侧执行）；公司 VPN：工作站内网地址 |
 | 本人 Paseo 端口 | `sudo paseo-user list` |
 | Paseo 密码 | 本人 `~/.paseo/client.env` 的 `PASEO_PASSWORD`；**只让用户自己查看，不在对话中回显** |
 | 设备登录的 Tailscale 身份 | 必须是本人账号，或接受了工作站的设备共享 |
@@ -24,10 +27,13 @@ description: 让自己的手机（iPhone / Android）和 Mac / 笔记本通过 T
 
 - **WSL**：确认 Windows 计划任务已同步转发：`netsh interface portproxy show all` 中有 `<WS_IP>:<端口>`；没有就运行 `windows\Sync-WorkstationEndpoints.ps1`（见 [pocketrig-always-on](../pocketrig-always-on/SKILL.md)）。
 - **原生 Linux / macOS**：实例直接监听 Tailscale 地址，或保持 127.0.0.1 用 `tailscale serve` 转发，按 [平台文档](../../docs/platforms.md) 选择一种。**不要**改成监听 `0.0.0.0`。
+- **公司 VPN**：`PW_LISTEN_HOST` 设为工作站内网地址后重新执行 `sudo paseo-user add <user> <端口>`；WSL 部署的 Windows 脚本不支持这条路线，见平台文档。
 
-## 2. Tailscale 授权
+## 2. Tailscale 授权（公司 VPN：主机防火墙）
 
 参考 [`templates/tailscale-policy.example.hujson`](../../templates/tailscale-policy.example.hujson)：工作站打 `tag:paseo-ws`，只放行本人身份到本人 Paseo 端口和 SSH 端口。新增窄规则前检查并移除旧的全放行规则（`"src": ["*"], "dst": ["*:*"]`），否则窄规则不起作用。修改 tailnet 策略前先给用户看 diff 并征得同意。
+
+走公司 VPN 时没有按人授权，同一 VPN 里的同事都能连到这个地址：只在主机防火墙放行 VPN 网段到 Paseo 端口和 SSH 端口，改防火墙前同样先征得同意。
 
 ## 3. 添加 Host
 
@@ -36,7 +42,7 @@ description: 让自己的手机（iPhone / Android）和 Mac / 笔记本通过 T
 | 字段 | 值 |
 | --- | --- |
 | Host / Port | `<WS_IP>` / 本人端口 |
-| Use SSL | 关闭（传输已由 Tailscale 加密） |
+| Use SSL | 关闭（Tailscale 已加密传输；公司 VPN 只加密到公司网络为止，向用户说明） |
 | Password | Paseo 密码（不是 SSH 密码，也不是 Tailscale Auth key） |
 
 iPhone 已在用 Shadowrocket 时，可按 [内置 Tailscale 教程](../../docs/ios-shadowrocket.md) 入网（已在 iPhone 实机验证），注意 Auth key 的身份归属与审批。

@@ -135,7 +135,7 @@ PC 的电源与休眠策略由管理员按实际安排：休眠期间任务和�
 
 ## 4. 原生 Linux / macOS 入口
 
-Tailscale 装在工作站本机时，不需要转发：Paseo 直接监听 Tailscale 地址，或者保持 127.0.0.1、由 `tailscale serve` 转发。完整步骤见[按宿主平台部署](platforms.md)。
+Tailscale 装在工作站本机时，不需要转发：Paseo 直接监听 Tailscale 地址，或者保持 127.0.0.1、由 `tailscale serve` 转发。完整步骤见[按宿主平台部署](platforms.md)。工作站在公司内网、成员走公司 VPN 时，可以不用 Tailscale，改为监听内网地址并用主机防火墙限制来源，见该文档第四节。
 
 ## 5. Tailscale 授权
 

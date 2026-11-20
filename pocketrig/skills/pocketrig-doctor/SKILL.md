@@ -35,7 +35,7 @@ description: 诊断与验收 PocketRig：按“服务 → 程序与登录 → �
    curl.exe -s -o NUL -w "%{http_code}" http://127.0.0.1:<port>/
    ```
    最后一条应返回 200。
-4. **网络授权**：设备的 Tailscale 是否已连接、身份是否正确、ACL / grants 是否放行该端口、是否残留全放行规则。
+4. **网络授权**：设备的 Tailscale 是否已连接、身份是否正确、ACL / grants 是否放行该端口、是否残留全放行规则。走公司 VPN 时改查：VPN 是否已连接、`PASEO_LISTEN` 是否为工作站当前内网地址、VPN 是否放行该网段与端口、主机防火墙是否放行 VPN 网段。
 5. **客户端**：Host、端口、Use SSL 关闭、密码是否误填 SSH 密码或 Auth key。
 
 ## 常见结论速查

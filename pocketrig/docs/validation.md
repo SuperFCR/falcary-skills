@@ -68,6 +68,7 @@ GitHub Actions 配置了 Ubuntu 的 ShellCheck、Ubuntu/macOS 的上述检查，
 | macOS 实机安装、launchd 与后台模型认证 | 待验收 |
 | Windows 冷启动无人登录、WSL 常驻恢复 | 待在部署设备验收 |
 | 从成员客户端验证 tailnet 授权和跨用户拒绝 | 待在实际 tailnet 验收 |
+| 公司 VPN 代替 Tailscale（`PW_LISTEN_HOST` 指向内网地址） | 配置已支持，待实机验收 |
 | iPhone Shadowrocket 内置 Tailscale | 2026-10-27 iPhone 实机验证通过（入网并连接本人 Paseo 实例） |
 | 可选出口网关真实节点、断网与恢复 | 待在独立测试环境验收；不要在本机 tailscaled 场景启用 |
 
