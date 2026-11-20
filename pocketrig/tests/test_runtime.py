@@ -139,6 +139,7 @@ class TemplateTests(TestCase):
             for target in re.findall(r'\]\(([^)]+)\)', path.read_text()):
                 if re.match(r'\w+:', target) or target.startswith('#'):
                     continue
-                target = unquote(target.split('#', 1)[0])
+                # Drop "#anchor" and GitHub's "?raw=true"-style query suffixes.
+                target = unquote(re.split(r'[#?]', target, maxsplit=1)[0])
                 with self.subTest(document=path.relative_to(REPO), target=target):
                     self.assertTrue((path.parent / target).exists())
