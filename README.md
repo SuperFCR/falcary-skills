@@ -6,7 +6,7 @@
 Each folder stands on its own and plugs into Claude Code, Codex, or any agent that reads `SKILL.md`.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Skills](https://img.shields.io/badge/skills-7-brightgreen.svg)
+![Skills](https://img.shields.io/badge/skills-8-brightgreen.svg)
 ![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-8A2BE2.svg)
 [![pocketrig CI](https://github.com/SuperFCR/falcary-skills/actions/workflows/pocketrig.yml/badge.svg)](https://github.com/SuperFCR/falcary-skills/actions/workflows/pocketrig.yml)
 
@@ -21,6 +21,7 @@ Each folder stands on its own and plugs into Claude Code, Codex, or any agent th
 | Folder | Skills | What it does | Version |
 | :-- | :-: | :-- | :-: |
 | [**overleaf-ctl**](overleaf-ctl/) | 1 | Write LaTeX papers with an agent: guarded two-way sync with Overleaf, local compilation, and a Chinese-draft → English-TeX workflow with a log of every writing round. | `1.1.0` |
+| [**paper-writing**](paper-writing/) | 1 | Paper figures: crop your exported PPT/Keynote PDF pages to vector figures, audit them at print width, insert/update them in your `.tex` with captions, and verify the compiled pages (`paper-drawing`). | `0.1.0` |
 | [**pocketrig**](pocketrig/) | 6 | Turn an always-on computer into your AI coding workstation: reach it from your phone and Mac over Tailscale, keep it online 24/7, and run heavy jobs on GPU nodes with the results back on your phone. | `1.0.0` |
 
 More are on the way. Each new skill gets its own folder and a row in this table.
@@ -84,6 +85,7 @@ Documentation: [English](pocketrig/README.md) · [简体中文](pocketrig/README
 ```text
 falcary-skills/
 ├── overleaf-ctl/        # LaTeX writing skill and its Python CLI
+├── paper-writing/       # paper-production skills: paper-drawing (figures → cropped PDF → .tex)
 ├── pocketrig/           # six workstation skills, installers for Linux / macOS / Windows, docs
 ├── .claude-plugin/      # marketplace manifest: installs pocketrig as a Claude Code plugin
 ├── .github/workflows/   # CI for pocketrig
@@ -108,6 +110,7 @@ falcary 的 agent skill 合集。每个顶层文件夹都能独立使用，可�
 | 文件夹 | Skill 数 | 用途 | 版本 |
 | :-- | :-: | :-- | :-: |
 | [**overleaf-ctl**](overleaf-ctl/) | 1 | 和 agent 一起写 LaTeX 论文：带保护的 Overleaf 双向同步、本地编译，以及“先写中文稿、再译成英文 TeX”的写作流程，每一轮修改都有记录。 | `1.1.0` |
+| [**paper-writing**](paper-writing/) | 1 | 论文配图（`paper-drawing`）：把你导出的 PPT/Keynote PDF 页面裁成矢量图，按印刷宽度做质量检查，写进 `.tex` 并配 caption，编译后核对页面。 | `0.1.0` |
 | [**pocketrig**](pocketrig/) | 6 | 把一台常开电脑变成 AI 编程工作站：手机和 Mac 经 Tailscale 连接，7×24 在线，重任务交给 GPU 节点，结果回到手机上看。 | `1.0.0` |
 
 安装 overleaf-ctl：
