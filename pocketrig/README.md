@@ -41,7 +41,9 @@ The skills and detailed docs are currently written in Chinese; agents can follow
 
 ## How it works
 
-![Architecture](docs/architecture.svg)
+[![Architecture](docs/architecture.svg)](docs/architecture.svg?raw=true)
+
+<sub>One always-on workstation; each person gets their own system account, Paseo instance and agent processes, and reaches compute nodes over SSH. <a href="docs/architecture.svg?raw=true">Open full size</a></sub>
 
 ```text
 Phone / Mac (Paseo app or web)

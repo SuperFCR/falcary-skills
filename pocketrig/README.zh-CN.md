@@ -39,7 +39,9 @@
 
 ## 工作方式
 
-![架构示意](docs/architecture.svg)
+[![架构示意](docs/architecture.svg)](docs/architecture.svg?raw=true)
+
+<sub>一台常开工作站；每人独立的系统账号、Paseo 实例与代理进程，经 SSH 访问计算节点。<a href="docs/architecture.svg?raw=true">Open full size</a></sub>
 
 ```text
 手机 / Mac（Paseo 客户端或网页）
