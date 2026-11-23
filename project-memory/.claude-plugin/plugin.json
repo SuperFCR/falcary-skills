@@ -1,0 +1,12 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "project-memory",
+  "version": "1.0.0",
+  "description": "Project memory skills: keep learned project knowledge and a live handoff inside each project (.agent-memory/), shared by Claude Code, Codex and every account, so a session can be resumed or switched to another agent at any time, even after a usage-limit stop.",
+  "author": { "name": "SuperFCR" },
+  "homepage": "https://github.com/SuperFCR/falcary-skills/tree/main/project-memory",
+  "repository": "https://github.com/SuperFCR/falcary-skills",
+  "license": "MIT",
+  "keywords": ["memory", "handoff", "claude-code", "codex", "auto-memory", "agents-md"],
+  "skills": ["./skills/"]
+}

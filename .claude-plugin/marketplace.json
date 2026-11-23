@@ -5,13 +5,19 @@
     "name": "SuperFCR"
   },
   "metadata": {
-    "description": "falcary 的 agent skill 合集；可作为插件安装的有 pocketrig"
+    "description": "falcary 的 agent skill 合集；可作为插件安装的有 pocketrig 与 project-memory"
   },
   "plugins": [
     {
       "name": "pocketrig",
       "source": "./pocketrig",
       "description": "安装、常驻、连接、远程计算、诊断与多人扩展六个 skill",
+      "version": "1.0.0"
+    },
+    {
+      "name": "project-memory",
+      "source": "./project-memory",
+      "description": "项目记忆放进项目本身：Claude Code、Codex 与不同账号共用 .agent-memory/，随时交接、换 agent、续上额度用尽中断的会话；含记忆、学习、反思、交接、体检五个 skill",
       "version": "1.0.0"
     }
   ]
