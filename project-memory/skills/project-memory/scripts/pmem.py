@@ -4,7 +4,8 @@
 
 Memory lives inside the project in ``<root>/.agent-memory/``: ``MEMORY.md`` (index, loaded
 natively by Claude Code through ``autoMemoryDirectory``), ``HANDOFF.md`` (live task state),
-``handoffs/<key>.md`` (parallel workstreams) and one fact per ``<name>.md`` file.
+``handoffs/<key>.md`` (parallel workstreams) and one fact per ``<name>.md`` file. Preferences are
+``feedback`` memories whose index lines sit under ``## Preferences`` in MEMORY.md (1.1).
 
 Single file, Python >= 3.9, standard library only, Linux and macOS.
 See the ``project-memory`` skill for the protocol agents follow.
@@ -21,6 +22,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -38,7 +40,7 @@ try:
 except ImportError:  # pragma: no cover
     pwd = None
 
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 MEMDIR = '.agent-memory'
 TYPES = ('user', 'feedback', 'project', 'reference')
 RESERVED_DIRS = ('team', 'logs', 'sessions', 'proposals')
@@ -63,12 +65,35 @@ REF_SCAN_TIMEOUT = 10  # s: `git log --all -- .agent-memory` outside hooks (hook
 STALE_GIT_LOCK = 600   # s: an older .git/index.lock in the private history is removed by snapshot
 LINK_PARSE_MAX = 2000  # longer lines are never parsed for links
 OTHER_HANDOFFS_MAX = 10  # other handoffs listed in the size-capped session-start context
-HOOK_EVENTS = (
-    ('SessionStart', 'startup|resume|clear|compact', 'session-start'),
-    ('Stop', None, 'checkpoint'),
-    ('StopFailure', None, 'checkpoint'),
-    ('PreCompact', None, 'checkpoint'),
+HOOK_EVENTS = (   # (event, matcher, `pmem hook` subcommand, timeout in s)
+    ('SessionStart', 'startup|resume|clear|compact', 'session-start', 10),
+    ('UserPromptSubmit', None, 'prompt', 5),
+    ('Stop', None, 'checkpoint', 10),
+    ('StopFailure', None, 'checkpoint', 10),
+    ('PreCompact', None, 'checkpoint', 10),
 )
+PREF_BEGIN = '<!-- BEGIN project-memory:preferences -->'
+PREF_END = '<!-- END project-memory:preferences -->'
+PREF_GLOBAL_HEADING = ('## Preferences for every project (managed by `pmem pref promote` / `pmem pref '
+                       "demote`; a project's own Preferences win on conflict)")
+PREF_RULE_MAX = 120        # chars of a rule (pref add / violated refuse longer)
+PREF_LINE_WARN = 220       # lint: preference entries are exempt from the 150 WARN, warn above this
+PREF_MAX_ENTRIES = 20      # lint: entries per section
+INHERIT_MAX_LINES, INHERIT_MAX_CHARS, INHERIT_RULE_CHARS = 40, 2000, 160
+PROMPT_MAX_CHARS = 300     # hook prompt: longer messages (after dropping pasted/fenced text) are skipped
+PROMPT_INTERVAL = 180      # s: at most one nudge per session in this interval
+PROMPT_NUDGE_CHARS = 600
+LIST_ALL_MAX_LINES = 200
+
+PREF_HEADING = '## Preferences'
+PREF_BLOCKQUOTE = ('> How the user wants you to work: follow every line, every session; on conflict this '
+                   'project beats outer folders and the global list. Save a new one at once by editing '
+                   'this file: `- [<title>](<name>.md) — <rule>` here (not under Memories) plus '
+                   '`<name>.md` as a `feedback` memory with **Why:** and **How to apply:**; then end your '
+                   'reply with `✓ preference: <rule>`.')
+MEMORIES_HEADING = '## Memories'
+HANDOFF_LINE = ('- [HANDOFF — current state](HANDOFF.md) — read before any task at session start; '
+                'update at milestones')
 
 # Templates (also shipped as skills/project-memory/templates/*; a test asserts files == constants).
 MEMORY_TEMPLATE = """\
@@ -76,10 +101,7 @@ MEMORY_TEMPLATE = """\
 
 > Shared by every agent and account working on this project. Never delete files here — retire them with `pmem archive`. HANDOFF.md and handoffs/ hold live task state: update them, never prune them.
 
-- [HANDOFF — current state](HANDOFF.md) — read before any task at session start; update at milestones
-"""
-
-HANDOFF_LINE = MEMORY_TEMPLATE.rstrip('\n').split('\n')[-1]
+""" + HANDOFF_LINE + "\n\n" + PREF_HEADING + "\n" + PREF_BLOCKQUOTE + "\n\n" + MEMORIES_HEADING + "\n"
 
 HANDOFF_TEMPLATE = """\
 ---
@@ -111,9 +133,10 @@ WIRE_BLOCK = """\
 <!-- BEGIN project-memory -->
 ## Project memory (`.agent-memory/`)
 - Project knowledge lives inside the project, shared by every agent and account: the nearest `.agent-memory/` from the working directory upward (never `$HOME`; in a git worktree, look from the main checkout). It takes precedence over any other memory location, including your built-in memory store and older per-repo notes files such as CLAUDE.local.md.
-- At session start and after compaction, run `pmem context` if available (handoff, any newer auto checkpoint, index); otherwise read `HANDOFF.md` (or your worktree's `handoffs/<name>.md`) and a newer `.checkpoints/<key>.md` — no agent loads these natively — then `MEMORY.md` if it is not already in your context. Open single memories only when relevant and verify them against the current code before acting.
+- At session start and after compaction, run `pmem context` if available (handoff, any newer auto checkpoint, inherited preferences, index); otherwise read `HANDOFF.md` (or your worktree's `handoffs/<name>.md`) and a newer `.checkpoints/<key>.md` — no agent loads these natively — then `MEMORY.md` if it is not already in your context. Open single memories only when relevant and verify them against the current code before acting.
+- Follow every line under `## Preferences` in that `MEMORY.md`, in the `MEMORY.md` of any `.agent-memory/` further up, and in this file's preferences block; on conflict the nearest wins. When the user states a lasting preference or corrects how you work, save it at once by editing the files: `- [<title>](<name>.md) — <rule>` under `## Preferences` plus `<name>.md` as a `feedback` memory with Why and How to apply (`pmem pref add` does the same; `--up` for the whole workspace), then end your reply with `✓ preference: <rule>`. If you broke an existing one, sharpen its line and move it to the top. Task-specific instructions are not preferences.
 - Before debugging an error, search the memory for its key tokens (`pmem find ...` or grep) and try a recorded fix first.
-- Save right away when the user corrects you or confirms an unusual approach, when a failure took 3+ attempts (symptom, root cause, fix), or when you repeat a multi-step procedure: one fact per file with `name`/`description`/`metadata.type`/`metadata.modified` (UTC) frontmatter plus one line in `MEMORY.md`. Never save secrets; preferences that hold for every project belong in your global instruction file (e.g. ~/.codex/AGENTS.md or ~/.claude/CLAUDE.md) instead.
+- Save right away when the user confirms an unusual approach, when a failure took 3+ attempts (symptom, root cause, fix), or when you repeat a multi-step procedure: one fact per file with `name`/`description`/`metadata.type`/`metadata.modified` (UTC) frontmatter plus one line in `MEMORY.md`. Never save secrets; a preference that holds for every project goes to the global preferences block only with the user's consent (`pmem pref promote`).
 - Keep the handoff current at milestones (step done, before long or remote jobs, before stopping), setting `metadata.modified` and `by`, so another agent can resume if this session ends abruptly. Never delete memory files; retire them with `pmem archive`.
 - If the sandbox blocks writes to `.agent-memory/`, ask for approval or a relaunch that makes it writable (e.g. start from the project root, or Codex `--add-dir <project root>`); never save elsewhere. Details: the `project-memory` skill; CLI `pmem` (`pmem status` reports wiring problems).
 <!-- END project-memory -->
@@ -648,8 +671,10 @@ def parse_frontmatter(fm_lines):
     return fm
 
 
-def render_memory(name, description, mtype, modified, body, old=None):
-    """Memory file text; unknown frontmatter keys of ``old`` are preserved."""
+def render_memory(name, description, mtype, modified, body, old=None, meta=None):
+    """Memory file text; unknown frontmatter keys of ``old`` are preserved. ``meta``: extra
+    metadata keys (an existing key of the same name is replaced)."""
+    meta = meta or {}
     out = ['---', 'name: ' + yaml_quote(name), 'description: ' + yaml_quote(oneline(description))]
     meta_extra = []
     if old is not None:
@@ -657,10 +682,12 @@ def render_memory(name, description, mtype, modified, body, old=None):
             if kind == 'other' or (kind == 'top' and key not in
                                    ('name', 'description', 'metadata', 'type', 'modified', 'updated')):
                 out.extend(raw)
-            elif kind == 'meta' and key not in ('type', 'modified', 'updated'):
+            elif kind == 'meta' and key not in ('type', 'modified', 'updated') and key not in meta:
                 for line in raw:
                     lead = len(line) - len(line.lstrip(' \t'))
                     meta_extra.append('  ' + line[min(lead, indent):] if line.strip() else line)
+    meta_extra += ['  %s: %s' % (k, v if isinstance(v, int) else yaml_quote(str(v)))
+                   for k, v in meta.items()]
     out += ['metadata:', '  type: ' + mtype, '  modified: ' + modified] + meta_extra + ['---', '']
     text = '\n'.join(out) + '\n'
     if body:
@@ -746,6 +773,7 @@ MD_LINK_RE = re.compile(r'\[(?:\\.|[^\[\]\\\n]|\[[^\[\]\n]*\])*\]'
                         r'\(\s*(<[^<>\n]*>|[^\s()<]*)(?:\s+(?:"[^"\n]*"|\'[^\'\n]*\'))?\s*\)')
 MEM_TARGET_RE = re.compile(r'^[^/:\\]+\.md$')
 FENCE_OPEN_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
+FENCE_CLOSE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})[ \t]*$')
 WIKI_LINK_RE = re.compile(r'\[\[([^\[\]\n]+)\]\]')
 WIKI_TARGET_RE = re.compile(r'^[^\s\'"\[\]][^\'"\[\]]*$')
 
@@ -819,24 +847,63 @@ def mask_inline(line, in_comment):
     return ''.join(chars), in_comment
 
 
-def mask_lines(contents):
-    """Line contents with code spans, HTML comments (multi-line too) and fenced code blocks
-    blanked out, keeping every length, so link offsets stay valid on the original lines."""
-    out = []
-    fence = None
+def fence_scan(contents, eof_closes=False):
+    """-> (flags, index of the first fence that never closes or None). ``flags[i]`` is True for
+    the lines of a fenced code block that closes (fence lines included). A fence that never
+    closes masks nothing (its opening line is ordinary text), unless ``eof_closes`` (CommonMark:
+    it runs to the end; used for prompts). Fences never open inside an HTML comment. Linear."""
+    n = len(contents)
+    closer = [None] * n
+    for i, c in enumerate(contents):
+        m = FENCE_CLOSE_RE.match(c)
+        if m:
+            closer[i] = (m.group(1)[0], len(m.group(1)))
+    longest = {'`': [0] * (n + 1), '~': [0] * (n + 1)}   # longest closing fence at or below i
+    for i in range(n - 1, -1, -1):
+        for ch in '`~':
+            longest[ch][i] = longest[ch][i + 1]
+        if closer[i] and closer[i][1] > longest[closer[i][0]][i]:
+            longest[closer[i][0]][i] = closer[i][1]
+    flags = [False] * n
+    unclosed = None
     in_comment = False
-    for c in contents:
-        if fence is not None:
-            if re.match(r'^ {0,3}%s{%d,}[ \t]*$' % (re.escape(fence[0]), fence[1]), c):
-                fence = None
-            out.append(' ' * len(c))
-            continue
+    i = 0
+    while i < n:
+        c = contents[i]
         if not in_comment:
             m = FENCE_OPEN_RE.match(c)
             if m and not (m.group(1)[0] == '`' and '`' in m.group(2)):
-                fence = (m.group(1)[0], len(m.group(1)))
-                out.append(' ' * len(c))
-                continue
+                ch, size = m.group(1)[0], len(m.group(1))
+                if longest[ch][i + 1] >= size:
+                    j = i + 1
+                    while not (closer[j] and closer[j][0] == ch and closer[j][1] >= size):
+                        j += 1
+                    for k in range(i, j + 1):
+                        flags[k] = True
+                    i = j + 1
+                    continue
+                if unclosed is None:
+                    unclosed = i
+                if eof_closes:
+                    for k in range(i, n):
+                        flags[k] = True
+                    break
+        _, in_comment = mask_inline(c, in_comment)
+        i += 1
+    return flags, unclosed
+
+
+def mask_lines(contents):
+    """Line contents with code spans, HTML comments (multi-line too) and fenced code blocks
+    blanked out, keeping every length, so link offsets stay valid on the original lines.
+    A code fence that never closes hides nothing (see fence_scan)."""
+    flags, _ = fence_scan(contents)
+    out = []
+    in_comment = False
+    for c, fenced in zip(contents, flags):
+        if fenced:
+            out.append(' ' * len(c))
+            continue
         masked, in_comment = mask_inline(c, in_comment)
         out.append(masked)
     return out
@@ -934,6 +1001,28 @@ def link_lines(lines):
     return out
 
 
+def canonical_target(masked):
+    """Memory link target of a CANONICAL index line (``masked``: see mask_lines), else None:
+    column 0, `- `, then the memory link right away (`- [title](name.md) — hook`). Only such
+    lines are ever moved or removed by pmem; other references (prose, blockquotes, `*`,
+    numbered or indented bullets) are left in place."""
+    if not masked.startswith('- ') or len(masked) > LINK_PARSE_MAX or not MD_LINK_RE.match(masked, 2):
+        return None
+    return memory_link_target(masked)
+
+
+def canonical_lines(lines, masked=None):
+    """[(index, target)] of the canonical index lines (lines: [content, eol] pairs or strings)."""
+    if masked is None:
+        masked = mask_lines([l if isinstance(l, str) else l[0] for l in lines])
+    out = []
+    for i, m in enumerate(masked):
+        t = canonical_target(m)
+        if t:
+            out.append((i, t))
+    return out
+
+
 def memory_files(memdir):
     """Top-level memory files: *.md except MEMORY.md/HANDOFF.md (reserved stems), dot-files and
     symlinks (never followed; lint reports them)."""
@@ -972,29 +1061,89 @@ def analyze_index(memdir, lines):
             'handoff_line': hpos[0] + 1 if hpos else None}
 
 
+def place_handoff(lines, eol, line, links):
+    """Insert the HANDOFF line before the first link line — or before the Preferences heading
+    when the first link line is at or after it (never into the section)."""
+    sec = pref_section(lines)
+    first = links[0][0] if links else None
+    if sec and (first is None or first >= sec[0]):
+        lines[sec[0]:sec[0]] = [line, ['', eol]]
+    elif first is not None:
+        lines.insert(first, line)
+    else:
+        append_line(lines, line[0], eol)
+
+
+def pref_index_line(path, fname=None):
+    """Preference entry for a feedback memory file, built like `pmem pref add` builds one:
+    `- [name](name.md) — description` with the title and the rule escaped."""
+    mf = MemFile(path)
+    fname = fname or mf.fname
+    stem = fname[:-3] if fname.endswith('.md') else fname
+    rule = oneline(mf.description or first_nonblank(mf.body if mf.closed else mf.text, 120))
+    title = (mf.name if mf.closed else '') or stem
+    line = entry_line(title, fname, rule) if rule else index_line(title, fname, '')
+    return line if line_target(line) == fname else index_line(stem, fname, '')
+
+
 def fix_index_lines(memdir, lines, eol):
-    """Pure-ish index repair; never touches non-memory-link lines. -> actions."""
-    actions = []
+    """Pure-ish index repair; never touches non-memory-link lines and moves or removes only
+    canonical index lines (see canonical_target). -> actions (lines starting with 'note: '
+    report what is left for the user and change nothing)."""
+    err = unclosed_error(lines)
+    if err:
+        raise err
+    actions, notes = [], []
     drop = set()
+    masked = mask_lines([c for c, _ in lines])
+    sec = pref_section(lines, masked)
+    in_sec = dict((e.idx, e) for e in section_entries(lines, sec, masked))
+    canon = dict(canonical_lines(lines, masked))
     for i, t in link_lines(lines):
-        if t != 'HANDOFF.md' and not os.path.isfile(os.path.join(memdir, t)):
-            actions.append('removed dangling index line for %s' % t)
-            drop.add(i)
+        if t == 'HANDOFF.md' or os.path.isfile(os.path.join(memdir, t)):
+            continue
+        if i not in canon:
+            notes.append('note: left MEMORY.md:%d in place: it links to the missing %s — edit it by '
+                         'hand' % (i + 1, t))
+            continue
+        e = in_sec.get(i)
+        if e is not None and e.hook:
+            # a preference whose file is missing: the rule stays as a bare entry
+            lines[i][0] = '- ' + e.hook
+            actions.append('kept the preference "%s" without its missing file %s' % (e.hook, t))
+            continue
+        actions.append('removed dangling index line for %s' % t)
+        drop.add(i)
     lines[:] = [l for i, l in enumerate(lines) if i not in drop]
     links = link_lines(lines)
     hpos = [i for i, t in links if t == 'HANDOFF.md']
+    sec = pref_section(lines)
     if not hpos:
-        if links:
-            lines.insert(links[0][0], [HANDOFF_LINE, eol])
-        else:
-            append_line(lines, HANDOFF_LINE, eol)
+        place_handoff(lines, eol, [HANDOFF_LINE, eol], links)
         actions.append('inserted the HANDOFF line')
+    elif hpos[0] != links[0][0] and not canonical_target(mask_lines([lines[hpos[0]][0]])[0]):
+        notes.append('note: left MEMORY.md:%d in place: it is the first line linking HANDOFF.md but not '
+                     'a `- [title](HANDOFF.md) — hook` line, so pmem does not move it — make the '
+                     'HANDOFF line the first link line by hand' % (hpos[0] + 1))
     elif hpos[0] != links[0][0]:
         moved = lines.pop(hpos[0])
         if moved[1] == '':
             moved[1] = eol
-        lines.insert(links[0][0], moved)
+        place_handoff(lines, eol, moved, link_lines(lines))
         actions.append('moved the HANDOFF line to be the first link line')
+    elif sec and sec[0] < hpos[0] < sec[1] and line_target(lines[hpos[0]][0]) == 'HANDOFF.md' \
+            and canonical_target(mask_lines([lines[hpos[0]][0]])[0]):
+        moved = lines.pop(hpos[0])
+        if moved[1] == '':
+            moved[1] = eol
+        place_handoff(lines, eol, moved, link_lines(lines))
+        actions.append('moved the HANDOFF line out of ## Preferences (above the heading)')
+    moved, left = move_feedback_into_section(memdir, lines, eol)
+    if moved:
+        actions.append('moved %d feedback line%s into Preferences — make each hook an imperative rule '
+                       '(memory-health)' % (moved, '' if moved == 1 else 's'))
+        if left:
+            notes.append('note: ' + left_note(left))
     linked = set(nfc(t) for _, t in link_lines(lines))
     for fn in memory_files(memdir):
         if nfc(fn) in linked:
@@ -1003,13 +1152,17 @@ def fix_index_lines(memdir, lines, eol):
             actions.append('cannot index %s — rename it (`:`, `\\` or line breaks cannot appear in '
                            'an index link)' % fn)
             continue
-        line = generated_index_line(os.path.join(memdir, fn))
-        if line_target(line) != fn:   # e.g. odd text in the title: fall back to the stem
-            line = index_line(fn[:-3], fn, '')
-        append_line(lines, line, eol)
+        sec = pref_section(lines)
+        if sec and memory_type(memdir, fn) == 'feedback':
+            section_insert(lines, eol, sec, [[pref_index_line(os.path.join(memdir, fn)), eol]])
+        else:
+            line = generated_index_line(os.path.join(memdir, fn))
+            if line_target(line) != fn:   # e.g. odd text in the title: fall back to the stem
+                line = index_line(fn[:-3], fn, '')
+            append_ordinary(lines, eol, line)
         linked.add(nfc(fn))
         actions.append('indexed %s' % fn)
-    return actions
+    return actions + notes
 
 
 def update_index_locked(memdir, func):
@@ -1029,6 +1182,819 @@ def update_index(memdir, func):
     """Run ``func(lines, eol)`` on MEMORY.md under the lock (fresh read); write when changed."""
     with memory_lock(memdir):
         return update_index_locked(memdir, func)
+
+
+# ---------------------------------------------------------------------------------------------
+# Fences and HTML comments; marker lines of managed blocks
+
+def fence_flags(contents, eof_closes=False):
+    """True for each line that is part of a fenced code block (fence lines included); see
+    fence_scan (a fence that never closes counts only with ``eof_closes``)."""
+    return fence_scan(contents, eof_closes)[0]
+
+
+def unclosed_fence(contents):
+    """1-based line number of a code fence that never closes (outside HTML comments), else
+    None. pmem does not treat the rest of the file as code, but renderers and agents may."""
+    n = fence_scan(contents)[1]
+    return None if n is None else n + 1
+
+
+def unclosed_comment(contents):
+    """1-based line number of an HTML comment that is still open at the end (outside fenced code
+    and code spans), else None. Everything after it is hidden from agents and from pmem."""
+    flags, _ = fence_scan(contents)
+    in_comment = False
+    start = None
+    for n, (c, fenced) in enumerate(zip(contents, flags), 1):
+        if fenced:
+            continue
+        was = in_comment
+        _, in_comment = mask_inline(c, in_comment)
+        if in_comment and (not was or '-->' in c):
+            start = n
+    return start if in_comment else None
+
+
+def unclosed_problem(contents):
+    """(kind, 1-based line) of an unclosed HTML comment or code fence in an index, else None."""
+    n = unclosed_comment(contents)
+    if n:
+        return 'HTML comment', n
+    n = unclosed_fence(contents)
+    if n:
+        return 'code fence', n
+    return None
+
+
+def marker_lines(contents, marker):
+    """Indexes of the lines that are exactly ``marker`` (surrounding whitespace and CR ignored),
+    outside fenced code blocks. ``contents``: line contents of a text whose BOM was removed."""
+    flags = fence_flags(contents)
+    return [i for i, c in enumerate(contents) if not flags[i] and c.strip() == marker]
+
+
+def text_lines(raw):
+    """bytes -> (bom, [content, eol] lines)."""
+    bom = raw.startswith(b'\xef\xbb\xbf')
+    return bom, to_lines(dec(raw[3:] if bom else raw))
+
+
+# ---------------------------------------------------------------------------------------------
+# Preferences: the `## Preferences` section of MEMORY.md
+
+PREF_HEADING_RE = re.compile(r'^ {0,3}##\s+preferences\s*#*\s*$', re.I)
+MEMORIES_HEADING_RE = re.compile(r'^ {0,3}##\s+memories\s*#*\s*$', re.I)
+HEADING_RE = re.compile(r'^ {0,3}#{1,6}(?:[ \t]|$)')
+SEP_RE = re.compile(r'^[\s—–:-]+')
+
+
+class Entry(object):
+    """One `- ` line of the Preferences section plus its indented continuation lines."""
+
+    def __init__(self, idx, end, content, target, rule, title, hook='', canonical=False):
+        self.idx, self.end, self.content = idx, end, content
+        self.target, self.rule, self.title = target, rule, title
+        self.hook = hook             # text after the memory link ('' when there is none)
+        self.canonical = canonical   # `- [title](name.md) …` (see canonical_target)
+        self.name = target[:-3] if target and target.endswith('.md') else None
+        self.kind = None     # pref (feedback file) | bare (no link) | dangling | other
+
+    @property
+    def is_pref(self):
+        return self.kind in ('pref', 'bare', 'dangling')
+
+
+def pref_section(lines, masked=None):
+    """(heading index, end index exclusive) of the first `## Preferences` heading (comments and
+    fenced code ignored), the section running to the next heading; None if there is none."""
+    contents = [l if isinstance(l, str) else l[0] for l in lines]
+    masked = masked if masked is not None else mask_lines(contents)
+    head = None
+    for i, m in enumerate(masked):
+        if head is None:
+            if PREF_HEADING_RE.match(m):
+                head = i
+        elif HEADING_RE.match(m):
+            return head, i
+    return (head, len(masked)) if head is not None else None
+
+
+def entry_parts(content, masked):
+    """-> (memory link target or None, rule text, link text or None, hook text) of an entry line:
+    the rule is the hook, i.e. the text after the memory link (`- [title](name.md) — rule`),
+    else the text before it, else the title."""
+    target = memory_link_target(masked)
+    m = MD_LINK_RE.search(masked) if target else None
+    dash = content.find('- ')
+    if not m:
+        return None, content[dash + 2:].strip(), None, ''
+    link = content[m.start():m.end()]
+    k = link.find('](')
+    title = link[1:k] if k > 0 else ''
+    before = content[dash + 2:m.start()].strip() if 0 <= dash < m.start() else ''
+    after = SEP_RE.sub('', content[m.end():]).strip()
+    rule = after or before.rstrip(' —–:-').strip() or title
+    return target, rule, title, after
+
+
+def indent_of(text):
+    return len(text) - len(text.lstrip(' \t'))
+
+
+def entry_block(lines, i):
+    """[start, end) of line ``i`` plus its continuation lines: the following non-blank lines that
+    are indented deeper than it."""
+    def text(k):
+        return lines[k] if isinstance(lines[k], str) else lines[k][0]
+    base = indent_of(text(i))
+    j = i + 1
+    while j < len(lines) and text(j).strip() and indent_of(text(j)) > base:
+        j += 1
+    return i, j
+
+
+def section_entries(lines, sec=None, masked=None):
+    """Entries of the Preferences section (kind not yet classified)."""
+    contents = [l if isinstance(l, str) else l[0] for l in lines]
+    masked = masked if masked is not None else mask_lines(contents)
+    sec = sec if sec is not None else pref_section(lines, masked)
+    if not sec:
+        return []
+    out = []
+    i, end = sec[0] + 1, sec[1]
+    while i < end:
+        if masked[i].startswith('- '):
+            j = min(entry_block(contents, i)[1], end)
+            target, rule, title, hook = entry_parts(contents[i], masked[i])
+            if target or rule:
+                out.append(Entry(i, j, contents[i], target, rule, title, hook,
+                                 bool(target) and canonical_target(masked[i]) == target))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def memory_type(memdir, fname, cache=None):
+    """metadata.type of a top-level memory file ('' if unreadable), None if it does not exist."""
+    if cache is not None and fname in cache:
+        return cache[fname]
+    p = os.path.join(memdir, fname)
+    if os.path.islink(p) or not os.path.isfile(p) or '/' in fname:
+        t = None
+    else:
+        t = MemFile(p, memdir).type
+    if cache is not None:
+        cache[fname] = t
+    return t
+
+
+def classify(memdir, entries, cache=None):
+    cache = {} if cache is None else cache
+    for e in entries:
+        if not e.target:
+            e.kind = 'bare'
+        elif e.target == 'HANDOFF.md':
+            e.kind = 'other'
+        else:
+            t = memory_type(memdir, e.target, cache)
+            e.kind = 'dangling' if t is None else ('pref' if t == 'feedback' else 'other')
+    return entries
+
+
+def pref_entries(memdir, lines, cache=None):
+    """Classified preference entries of an index (lines: [content, eol] pairs or strings)."""
+    return [e for e in classify(memdir, section_entries(lines), cache) if e.is_pref]
+
+
+def norm_rule(text):
+    """Comparison key of a rule: NFKC, casefold, no leading ⚠, no non-word characters."""
+    s = unicodedata.normalize('NFKC', text or '').strip()
+    if s.startswith('⚠'):
+        s = s[1:]
+    return re.sub(r'\W+', '', s.casefold())
+
+
+def rule_md(rule):
+    """Rule text for an index line: `[` and `]` escaped outside code spans."""
+    masked, _ = mask_inline(rule, False)
+    out = []
+    for i, ch in enumerate(rule):
+        if ch in '[]' and masked[i] == ch and not (i and rule[i - 1] == '\\'):
+            out.append('\\' + ch)
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+def check_rule(rule, check_len=True):
+    """Validate a rule (exit 2 on problems). -> the stripped rule."""
+    if rule is None or not rule.strip():
+        raise PmemError('RULE is empty', 2)
+    if '\n' in rule or '\r' in rule:
+        raise PmemError('RULE must be a single line', 2)
+    rule = rule.strip()
+    if check_len and len(rule) > PREF_RULE_MAX:
+        raise PmemError('RULE has %d characters (max %d): put detail in the body (--why/--how) and keep '
+                        'the rule one short imperative line' % (len(rule), PREF_RULE_MAX), 2)
+    if '<!--' in rule or '-->' in rule:
+        raise PmemError('RULE must not contain <!-- or -->', 2)
+    if rule.startswith(('#', '>')):
+        raise PmemError('RULE must not start with # or >', 2)
+    return rule
+
+
+def entry_line(title, fname, rule):
+    """`- [title](name.md) — rule` (falls back to the stem as title if the link would not parse)."""
+    line = '- [%s](%s) — %s' % (md_text(title), md_target(fname), rule_md(rule))
+    if line_target(line) != fname:
+        line = '- [%s](%s) — %s' % (md_text(fname[:-3]), md_target(fname), rule_md(rule))
+    return line
+
+
+def blank_line_before(lines, j):
+    """Whether a list entry inserted at ``j`` needs a blank line first (after a blockquote)."""
+    return j > 0 and lines[j - 1][0].lstrip().startswith('>')
+
+
+def section_insert(lines, eol, sec, block, top=False):
+    """Insert ``block`` ([content, eol] pairs) at the end of the section (``top``: before its
+    first entry). -> index of the first inserted line."""
+    head, end = sec
+    if top:
+        entries = section_entries(lines, sec)
+        if entries:
+            j = entries[0].idx
+            lines[j:j] = block
+            return j
+    j = end
+    while j > head + 1 and not lines[j - 1][0].strip():
+        j -= 1
+    if lines[j - 1][1] == '':
+        lines[j - 1][1] = eol
+    pre = [['', eol]] if blank_line_before(lines, j) else []
+    post = [['', eol]] if j < len(lines) and lines[j][0].strip() else []
+    lines[j:j] = pre + block + post
+    return j + len(pre)
+
+
+def append_ordinary(lines, eol, text):
+    """Append an ordinary index line (or a block of [content, eol] lines) at the end, never into
+    the Preferences section: if the file ends inside it, a blank line and `## Memories` come
+    first."""
+    sec = pref_section(lines)
+    if sec and sec[1] == len(lines):
+        if lines and lines[-1][0].strip():
+            append_line(lines, '', eol)
+        append_line(lines, MEMORIES_HEADING, eol)
+    for c in ([text] if isinstance(text, str) else [c for c, _ in text]):
+        append_line(lines, c, eol)
+
+
+def insert_section(lines, eol, mode):
+    """Add `## Preferences` + blockquote + `## Memories`. ``mode`` 'init': only right after the
+    HANDOFF line; 'add': else before the first memory link line, else at the end. An existing
+    `## Memories` heading is reused: when it is the next heading after that point (or the
+    heading above it), the section goes right before it and no second one is added.
+    -> True if inserted."""
+    links = link_lines(lines)
+    hpos = [i for i, t in links if t == 'HANDOFF.md']
+    if hpos:
+        at = entry_block(lines, hpos[0])[1]           # after its continuation lines, if any
+    elif mode != 'add':
+        return False
+    elif links:
+        at = links[0][0]
+    else:
+        at = len(lines)
+    masked = mask_lines([c for c, _ in lines])
+    heads = [i for i, m in enumerate(masked) if HEADING_RE.match(m)]
+    nxt = next((i for i in heads if i >= at), None)
+    prev = [i for i in heads if i < at]
+    mem = None
+    if nxt is not None and MEMORIES_HEADING_RE.match(masked[nxt]):
+        mem = nxt
+    elif prev and MEMORIES_HEADING_RE.match(masked[prev[-1]]):
+        mem = prev[-1]
+    if mem is not None:
+        at = mem
+        while at > 0 and not lines[at - 1][0].strip():
+            at -= 1
+        if at > 0 and lines[at - 1][1] == '':
+            lines[at - 1][1] = eol
+        block = [[PREF_HEADING, eol], [PREF_BLOCKQUOTE, eol], ['', eol]]
+        if at > 0:
+            block.insert(0, ['', eol])
+        lines[at:mem] = block
+        return True
+    block = [['', eol], [PREF_HEADING, eol], [PREF_BLOCKQUOTE, eol], ['', eol],
+             [MEMORIES_HEADING, eol]]
+    if at > 0 and lines[at - 1][1] == '':
+        lines[at - 1][1] = eol
+    if hpos:
+        lines[at:at] = block
+        return True
+    if at == 0 or not lines[at - 1][0].strip():
+        block = block[1:]
+    lines[at:at] = block
+    return True
+
+
+def move_feedback_into_section(memdir, lines, eol, cache=None):
+    """Move the canonical index line (with its continuation lines) of every feedback memory that
+    has no entry in the Preferences section to the end of it, keeping text and order. Nothing
+    else moves and nothing is ever deleted: other references to a feedback memory (prose,
+    blockquotes, other bullets, a second index line) stay where they are.
+    -> (moved count, [(line number, file)] of references to feedback memories left outside)."""
+    cache = {} if cache is None else cache
+    sec = pref_section(lines)
+    if not sec:
+        return 0, []
+    inside = set(nfc(e.target) for e in section_entries(lines, sec) if e.target)
+    blocks, seen = [], set()
+    for i, t in canonical_lines(lines):
+        if sec[0] <= i < sec[1] or nfc(t) in inside or nfc(t) in seen:
+            continue
+        if memory_type(memdir, t, cache) != 'feedback':
+            continue
+        seen.add(nfc(t))
+        blocks.append(entry_block(lines, i))
+    if blocks:
+        drop, moved_lines = set(), []
+        for a, b in blocks:
+            drop.update(range(a, b))
+            moved_lines += [[lines[k][0], eol] for k in range(a, b)]
+        lines[:] = [l for k, l in enumerate(lines) if k not in drop]
+        section_insert(lines, eol, pref_section(lines), moved_lines)
+    outside, extra = feedback_refs(memdir, lines, cache)
+    left = sorted([(ln, t) for ln, t, _ in outside] + extra)
+    return len(blocks), left
+
+
+def feedback_refs(memdir, lines, cache=None):
+    """Memory link lines that point to feedback memories, except each one's entry in the
+    Preferences section (its first canonical entry, else its first entry). -> (outside, extra).
+    outside: [(line number, file, canonical)] — one per feedback memory with no entry in the
+    section: its first canonical index line, else its first other reference. extra: [(line number,
+    file)] — every other such line, inside the section or not (pmem never deletes them)."""
+    cache = {} if cache is None else cache
+    contents = [l if isinstance(l, str) else l[0] for l in lines]
+    masked = mask_lines(contents)
+    sec = pref_section(lines, masked)
+    primary = {}
+    if sec:
+        ents = [e for e in section_entries(lines, sec, masked) if e.target]
+        for e in sorted(ents, key=lambda x: (not x.canonical, x.idx)):
+            primary.setdefault(nfc(e.target), e.idx)
+    canon = dict(canonical_lines(lines, masked))
+    refs = collections.OrderedDict()
+    for i, t in link_lines(lines):
+        if memory_type(memdir, t, cache) != 'feedback':
+            continue
+        refs.setdefault(nfc(t), []).append((i, t, i in canon))
+    outside, extra = [], []
+    for key, found in refs.items():
+        if key in primary:
+            extra += [(i + 1, t) for i, t, _ in found if i != primary[key]]
+            continue
+        first = next((x for x in found if x[2]), found[0])
+        outside.append((first[0] + 1, first[1], first[2]))
+        extra += [(i + 1, t) for i, t, c in found if (i, t, c) != first]
+    outside.sort()
+    extra.sort()
+    return outside, extra
+
+
+UNCLOSED_WHAT = {'HTML comment': 'an HTML comment', 'code fence': 'a code fence'}
+UNCLOSED_CLOSE = {'HTML comment': '-->', 'code fence': 'a closing ``` (or ~~~) line'}
+
+
+def unclosed_error(lines):
+    """PmemError for an index with an unclosed comment or code fence (writers refuse), else None."""
+    prob = unclosed_problem([l if isinstance(l, str) else l[0] for l in lines])
+    if not prob:
+        return None
+    hides = ('hides the rest of the index from agents and from pmem' if prob[0] == 'HTML comment'
+             else 'turns the rest of the index into code')
+    return PmemError('MEMORY.md:%d opens %s that never closes, which %s; close it with %s and '
+                     'rerun — nothing written' % (prob[1], UNCLOSED_WHAT[prob[0]], hides,
+                                                   UNCLOSED_CLOSE[prob[0]]), 1)
+
+
+def left_note(left):
+    """Report line for references to feedback memories that pmem left in place."""
+    shown = ', '.join('MEMORY.md:%d (%s)' % x for x in left[:5])
+    return ('left %d other reference%s to feedback memories in place: %s%s — pmem only moves '
+            '`- [title](name.md) — rule` lines; fix the others by hand (pmem lint)' % (
+                len(left), '' if len(left) == 1 else 's', shown, ', …' if len(left) > 5 else ''))
+
+
+def index_over_cap(lines):
+    """Memory files the native loader no longer sees (past line 200 / 25,000 chars), or None if
+    the index fits."""
+    total = sum(len(c) + len(e) for c, e in lines)
+    if len(lines) <= INDEX_MAX_LINES and total <= INDEX_MAX_CHARS:
+        return None
+    cut, chars = min(len(lines), INDEX_MAX_LINES), 0
+    for i, (c, e) in enumerate(lines):
+        chars += len(c) + len(e)
+        if chars > INDEX_MAX_CHARS:
+            cut = min(cut, i)
+            break
+    return [t for i, t in link_lines(lines) if i >= cut]
+
+
+def migrate_index(memdir, lines, eol, mode=None):
+    """1.1 migration of MEMORY.md lines in place. ``mode``: None (move into an existing section
+    only), 'init' or 'add' (insert the section first, see insert_section). -> report lines."""
+    report = []
+    prob = unclosed_problem([c for c, _ in lines])
+    if prob:
+        report.append('warning: MEMORY.md:%d opens %s that never closes; preferences not migrated '
+                      '— close it with %s' % (prob[1], UNCLOSED_WHAT[prob[0]],
+                                              UNCLOSED_CLOSE[prob[0]]))
+        return report
+    if not pref_section(lines):
+        if mode is None:
+            return report
+        if not insert_section(lines, eol, mode):
+            report.append('hint: MEMORY.md has no HANDOFF line, so no ## Preferences section was added '
+                          '— run `pmem index --fix`, then `pmem init` again')
+            return report
+        report.append('updated MEMORY.md: added the ## Preferences and ## Memories sections')
+    moved, left = move_feedback_into_section(memdir, lines, eol)
+    if moved:
+        report.append('moved %d feedback line%s into Preferences — make each hook an imperative rule '
+                      '(memory-health)' % (moved, '' if moved == 1 else 's'))
+        if left:
+            report.append(left_note(left))
+    if moved or report:
+        hidden = index_over_cap(lines)
+        if hidden is not None:
+            report.append('warning: MEMORY.md now has %d lines / %d chars, over the native load cap '
+                          '(200 lines / 25,000 chars); agents no longer see: %s — shrink it '
+                          '(memory-health)' % (len(lines), sum(len(c) + len(e) for c, e in lines),
+                                               ', '.join(hidden) or 'the last lines'))
+    return report
+
+
+def remove_entry(lines, e):
+    """Delete an entry with its continuation lines, except continuation lines that link to a
+    memory (references are never deleted: they stay where they are); no double blank line is left
+    behind. -> the removed lines."""
+    tail = lines[e.idx + 1:e.end]
+    linked = set(k for k, _ in link_lines(tail))
+    removed = [lines[e.idx]] + [l for k, l in enumerate(tail) if k not in linked]
+    kept = [l for k, l in enumerate(tail) if k in linked]
+    lines[e.idx:e.end] = kept
+    i = e.idx + len(kept)
+    if 0 < i < len(lines) and not lines[i - 1][0].strip() and not lines[i][0].strip():
+        del lines[i]
+    return removed
+
+
+def editable(e):
+    """pmem edits, moves or removes only bare `- rule` entries and canonical index lines."""
+    return not e.target or e.canonical
+
+
+def not_canonical(e):
+    """Why pmem leaves entry ``e`` alone (see editable)."""
+    return ('the entry for %s at MEMORY.md:%d is not a `- [title](%s) — rule` line (pmem edits only '
+            'such lines)' % (e.target, e.idx + 1, e.target))
+
+
+def left_in_place(e):
+    return 'note: %s; left it in place — fix it by hand' % not_canonical(e)
+
+
+def entry_with_rule(e, rule):
+    """The entry's line with its rule replaced (memory link and title kept)."""
+    if not e.target:
+        return '- ' + rule_md(rule)
+    m = MD_LINK_RE.search(mask_lines([e.content])[0])
+    return '- ' + e.content[m.start():m.end()] + ' — ' + rule_md(rule)
+
+
+# ---------------------------------------------------------------------------------------------
+# Preferences: outer folders (inheritance), registry
+
+def owner_problem(memdir):
+    """Why an outer (or registered) memory dir is not trusted, else None: the dir and its
+    MEMORY.md must be yours and not group/world-writable, and no directory on the path may be
+    world-writable without the sticky bit."""
+    uid = os.getuid() if hasattr(os, 'getuid') else None
+    for p in (memdir, os.path.join(memdir, 'MEMORY.md')):
+        try:
+            st = os.lstat(p)
+        except OSError as e:
+            return 'cannot stat %s (%s)' % (p, e.strerror or e)
+        if stat.S_ISLNK(st.st_mode):
+            return '%s is a symlink' % p
+        if uid is not None and st.st_uid != uid:
+            return '%s is owned by another user (uid %d)' % (p, st.st_uid)
+        if st.st_mode & 0o022:
+            return '%s is group- or world-writable (chmod go-w %s)' % (p, shell_quote(p))
+    d = os.path.dirname(memdir)
+    while True:
+        try:
+            st = os.stat(d)
+        except OSError as e:
+            return 'cannot stat %s (%s)' % (d, e.strerror or e)
+        if st.st_mode & 0o002 and not st.st_mode & stat.S_ISVTX:
+            return 'the directory %s on its path is world-writable without the sticky bit' % d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def outer_memdirs(root, home):
+    """Memory dirs above the project root ``root``, nearest first: (used [memdir], skipped
+    [(memdir, reason)]). HOME, its ancestors and / are never used (as in discovery)."""
+    used, skipped = [], []
+    if not root:
+        return used, skipped
+    d = os.path.dirname(os.path.realpath(root))
+    while not rejected_root(d, home):
+        cand = os.path.join(d, MEMDIR)
+        if os.path.islink(cand):
+            skipped.append((cand, 'it is a symlink (never followed for inherited preferences)'))
+        elif os.path.isdir(cand) and os.path.lexists(os.path.join(cand, 'MEMORY.md')):
+            why = memdir_problem(cand, d, home) or owner_problem(cand)
+            if why:
+                skipped.append((cand, why))
+            else:
+                used.append(cand)
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return used, skipped
+
+
+def read_prefs(memdir):
+    """Preference entries of a memory dir's MEMORY.md ([] when missing or unreadable)."""
+    try:
+        _, _, lines = read_index(memdir)
+    except PmemError:
+        return []
+    return pref_entries(memdir, lines) if lines else []
+
+
+def inherited_prefs(ctx):
+    """-> (used [(memdir, entries)], skipped [(memdir, reason)]) for the project of ``ctx``."""
+    used, skipped = outer_memdirs(ctx.root, ctx.home)
+    return [(m, read_prefs(m)) for m in used], skipped
+
+
+def cut(text, n):
+    text = oneline(text)
+    return text if len(text) <= n else text[:n - 1] + '…'
+
+
+INHERIT_HEAD = ("## Inherited preferences (outer folders; this project's own Preferences win on "
+                "conflict)")
+OUTSIDE_HEAD = '## Preferences recorded outside the section'
+
+
+def capped_section(head, items, max_chars=INHERIT_MAX_CHARS, max_lines=INHERIT_MAX_LINES):
+    """``head`` + item lines within max_lines AND max_chars; the rest -> `- … N more — pmem pref
+    list`. None when there are no items."""
+    if not items:
+        return None
+    out = [head]
+    size = len(head)
+    for k, item in enumerate(items):
+        rest = len(items) - k
+        more = '- … %d more — pmem pref list' % rest
+        reserve = 0 if rest == 1 else len(more) + 1
+        if k >= max_lines or size + 1 + len(item) + reserve > max_chars:
+            out.append(more)
+            break
+        out.append(item)
+        size += 1 + len(item)
+    return '\n'.join(out)
+
+
+def inherited_lines(used):
+    return ['- %s  (from %s)' % (cut(e.rule, INHERIT_RULE_CHARS), m)
+            for m, entries in used for e in entries]
+
+
+def outside_lines(memdir, lines):
+    out = []
+    for _, t, _canonical in feedback_outside(memdir, lines):
+        mf = MemFile(os.path.join(memdir, t), memdir)
+        out.append('- %s — %s' % (mf.name or t[:-3], cut(mf.description or first_nonblank(mf.body, 160),
+                                                          INHERIT_RULE_CHARS)))
+    return out
+
+
+def registry_path():
+    return os.path.join(os.path.dirname(stable_hook_path()), 'projects.txt')
+
+
+def register_memdir(memdir):
+    """Append the memory dir to the registry (one O_APPEND write; never rewritten). -> warning
+    text or None."""
+    path = registry_path()
+    real = os.path.realpath(memdir)
+    if '\n' in real or '\r' in real:
+        return None
+    try:
+        try:
+            if real in read_text(path).splitlines():
+                return None
+        except FileNotFoundError:
+            pass
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0),
+                     0o644)
+        try:
+            os.write(fd, enc(real + '\n'))
+        finally:
+            os.close(fd)
+    except OSError as e:
+        return 'cannot register %s in %s (%s); `pmem pref list --all` will not show it' % (
+            real, path, e.strerror or e)
+    return None
+
+
+def registered_memdirs():
+    """Registered memory dirs that still exist and pass the safety and ownership rules."""
+    try:
+        text = read_text(registry_path())
+    except OSError:
+        return []
+    out, seen, home = [], set(), home_dir()
+    for line in text.splitlines():
+        p = line.strip()
+        if not p or not os.path.isabs(p) or p in seen:
+            continue
+        seen.add(p)
+        if not os.path.isdir(p) or os.path.islink(p) or os.path.basename(p) != MEMDIR:
+            continue
+        if memdir_problem(p, os.path.dirname(p), home) or owner_problem(p):
+            continue
+        out.append(p)
+    return out
+
+
+# ---------------------------------------------------------------------------------------------
+# Preferences: the global block in CLAUDE.md / AGENTS.md
+
+class GlobalFile(object):
+    """A global instruction file with its project-memory block and preferences sub-block."""
+
+    def __init__(self, path, error=None):
+        self.path = path
+        self.exists = False
+        self.raw = b''
+        self.error = error
+        self.main = self.sub = None
+        self.bom, self.lines, self.eol = False, [], '\n'
+        if error:
+            return
+        try:
+            self.raw = read_bytes(path)
+            self.exists = True
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            self.error = 'cannot read it: %s' % (e.strerror or e)
+            return
+        self.bom, self.lines = text_lines(self.raw)
+        self.eol = eol_of(self.lines)
+        self.error = block_problem(self.lines)
+        if self.error:
+            return
+        contents = [c for c, _ in self.lines]
+        mb, me = marker_lines(contents, WIRE_BEGIN), marker_lines(contents, WIRE_END)
+        sb, se = marker_lines(contents, PREF_BEGIN), marker_lines(contents, PREF_END)
+        self.main = (mb[0], me[0]) if mb else None
+        self.sub = (sb[0], se[0]) if sb else None
+
+    def entries(self):
+        """[(start, end, rule)] of the `- ` lines in the preferences block."""
+        if not self.sub:
+            return []
+        out = []
+        i, end = self.sub[0] + 1, self.sub[1]
+        while i < end:
+            c = self.lines[i][0]
+            if c.startswith('- '):
+                j = min(entry_block(self.lines, i)[1], end)
+                out.append((i, j, c[2:].strip()))
+                i = j
+            else:
+                i += 1
+        return out
+
+    def rules(self):
+        return [r for _, _, r in self.entries()]
+
+    def data(self, lines=None):
+        return (b'\xef\xbb\xbf' if self.bom else b'') + enc(from_lines(lines or self.lines))
+
+
+def block_problem(lines):
+    """Why the project-memory markers of a file are malformed, else None (main block: one BEGIN
+    before one END, or none; preferences block: the same, and outside the main block)."""
+    contents = [c for c, _ in lines]
+    flags = fence_flags(contents)
+    fenced = [i for i, c in enumerate(contents)
+              if flags[i] and c.strip() in (WIRE_BEGIN, WIRE_END, PREF_BEGIN, PREF_END)]
+    if fenced:
+        return ('project-memory markers inside a code block (line(s) %s) — fix by hand'
+                % ', '.join(str(i + 1) for i in fenced))
+    mb, me = marker_lines(contents, WIRE_BEGIN), marker_lines(contents, WIRE_END)
+    sb, se = marker_lines(contents, PREF_BEGIN), marker_lines(contents, PREF_END)
+    if (mb or me) and not (len(mb) == 1 and len(me) == 1 and mb[0] < me[0]):
+        return ('unbalanced project-memory markers (BEGIN at line(s) %s; END at line(s) %s)'
+                % (', '.join(str(i + 1) for i in mb) or 'none',
+                   ', '.join(str(i + 1) for i in me) or 'none'))
+    if (sb or se) and not (len(sb) == 1 and len(se) == 1 and sb[0] < se[0]):
+        return ('malformed preferences block (BEGIN at line(s) %s; END at line(s) %s)'
+                % (', '.join(str(i + 1) for i in sb) or 'none',
+                   ', '.join(str(i + 1) for i in se) or 'none'))
+    if mb and sb and not (se[0] < mb[0] or sb[0] > me[0]):
+        return ('the preferences block (lines %d-%d) overlaps the project-memory block (lines %d-%d)'
+                % (sb[0] + 1, se[0] + 1, mb[0] + 1, me[0] + 1))
+    return None
+
+
+def global_candidates(config_dirs=(), targets=(), only=False):
+    """Global instruction files: Codex AGENTS.md, <cfg>/CLAUDE.md of $CLAUDE_CONFIG_DIR, ~/.claude
+    and each --config-dir, then each --target; deduped by realpath. ``only``: just the
+    --config-dir and --target files (all explicit). -> [(path, explicit)]"""
+    if only:
+        cands = [(os.path.join(os.path.abspath(os.path.expanduser(d)), 'CLAUDE.md'), True)
+                 for d in config_dirs]
+    else:
+        cands = [(codex_agents_path(), False)]
+        cands += [(os.path.join(d, 'CLAUDE.md'), False)
+                  for d in claude_config_dirs(config_dirs, both=True)]
+    cands += [(os.path.abspath(os.path.expanduser(t)), True) for t in targets]
+    out, seen = [], {}
+    for p, explicit in cands:
+        r = os.path.realpath(p)
+        if r in seen:
+            if explicit:
+                out[seen[r]] = (out[seen[r]][0], True)
+            continue
+        seen[r] = len(out)
+        out.append((p, explicit))
+    return out
+
+
+def global_files(config_dirs=(), targets=(), only=False):
+    """Read targets: candidates with the main block or the preferences block, plus every explicit
+    --target. -> [GlobalFile] (an unreadable or malformed one carries ``error``)."""
+    out = []
+    for p, explicit in global_candidates(config_dirs, targets, only):
+        if os.path.isdir(p):
+            if explicit:
+                out.append(GlobalFile(p, 'it is a directory'))
+            continue
+        g = GlobalFile(p)
+        if explicit or g.error and g.exists or g.main or g.sub:
+            out.append(g)
+    return out
+
+
+def global_divergence(files):
+    """True if the normalized rule sets of the targets differ."""
+    sets = [frozenset(norm_rule(r) for r in g.rules()) for g in files if not g.error]
+    return len(set(sets)) > 1
+
+
+def writable_problem(path):
+    """Why ``path`` (written through a symlink, backed up next to the given path) cannot be
+    replaced atomically, else None."""
+    real = os.path.realpath(path)
+    for d in sorted(set([os.path.dirname(real), os.path.dirname(os.path.abspath(path))])):
+        if not os.access(d, os.W_OK | os.X_OK):
+            return 'the directory %s is not writable' % d
+    if os.path.exists(real) and not os.access(real, os.W_OK):
+        return 'it is not writable'
+    return None
+
+
+def write_globals(plans):
+    """Phase 2 of a global edit: back up and write each changed file. ``plans``: [(GlobalFile,
+    new bytes)] that all passed phase 1. -> paths written."""
+    done = []
+    for g, new in plans:
+        if new == g.raw:
+            print('ok %s (unchanged)' % g.path)
+            continue
+        print('backup %s' % backup_file(g.path, g.raw))
+        atomic_write(g.path, new)
+        print('wrote %s' % g.path)
+        done.append(g.path)
+    return done
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1737,12 +2703,13 @@ def plan_claude_wiring(root, memdir, hooks=True, allow_dream=False, force=False)
             else:
                 del hk[ev]
     if hooks:
-        for ev, matcher, sub in HOOK_EVENTS:
+        for ev, matcher, sub, timeout in HOOK_EVENTS:
             group = collections.OrderedDict()
             if matcher:
                 group['matcher'] = matcher
             group['hooks'] = [collections.OrderedDict([('type', 'command'),
-                                                       ('command', hook_command(sub))])]
+                                                       ('command', hook_command(sub)),
+                                                       ('timeout', timeout)])]
             if ev in hk and not isinstance(hk[ev], list):
                 raise PmemError('%s: hooks.%s is not a list; nothing written' % (path, ev), 1)
             hk.setdefault(ev, []).append(group)
@@ -1768,13 +2735,13 @@ def write_claude_settings(plan, out):
     out.append('%s %s' % ('updated' if old is not None else 'created', path))
 
 
-def hook_script_ready(out, cache):
+def hook_script_ready(out, cache, force=False):
     """Install the stable hook copy (once per run) BEFORE any hook entry points to it.
     -> True if a hook script is in place."""
     if 'ready' not in cache:
         dest = stable_hook_path()
         try:
-            install_stable_copy(out)
+            install_stable_copy(out, force)
             cache['ready'] = True
         except OSError as e:
             cache['ready'] = os.path.isfile(dest) and not os.path.islink(dest)
@@ -1787,16 +2754,34 @@ def hook_script_ready(out, cache):
 
 def wire_claude_root(root, memdir, args, out, cache, plan=None):
     """§5 wiring of one Claude root: hook script first, then settings.local.json."""
-    hooks = not args.no_hooks and hook_script_ready(out, cache)
+    hooks = not args.no_hooks and hook_script_ready(out, cache, args.force)
     if plan is None or hooks != (not args.no_hooks):
         plan = plan_claude_wiring(root, memdir, hooks=hooks, allow_dream=args.allow_dream,
                                   force=args.force)
     write_claude_settings(plan, out)
 
 
-def install_stable_copy(out):
+VERSION_RE = re.compile(rb'(?m)^VERSION = [\'"]([0-9][0-9A-Za-z.+-]*)[\'"]')
+
+
+def script_version(path):
+    """VERSION of a pmem.py copy (None if missing, unreadable or without one)."""
+    try:
+        with open(path, 'rb') as f:
+            m = VERSION_RE.search(f.read(65536))
+    except OSError:
+        return None
+    return m.group(1).decode('ascii', 'replace') if m else None
+
+
+def version_key(v):
+    return tuple(int(x) for x in re.findall(r'\d+', v or '')[:3]) if v else ()
+
+
+def install_stable_copy(out, force=False):
     """Copy this script to the stable hook path (atomic, 0755). A symlink there is replaced by a
-    regular file, never written through. Raises OSError when the location is not writable."""
+    regular file, never written through; a copy with a NEWER version is kept unless ``force``.
+    Raises OSError when the location is not writable."""
     dest = stable_hook_path()
     try:
         src = read_bytes(os.path.realpath(__file__))
@@ -1810,6 +2795,12 @@ def install_stable_copy(out):
         same = False
     if same:
         out.append('ok hook script %s' % dest)
+        return
+    theirs = None if link else script_version(dest)
+    if theirs and version_key(theirs) > version_key(VERSION) and not force:
+        out.append('warning: kept the hook script %s: it is pmem %s, newer than this pmem %s — run '
+                   '`pmem init` with the newer copy (or `pmem init --force` to downgrade)'
+                   % (dest, theirs, VERSION))
         return
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     atomic_write(dest, src, mode=0o755, follow=False)
@@ -1840,7 +2831,7 @@ def claude_wiring_state(root, memdir):
     path = settings_path(root)
     obj, err = read_settings(path)
     st = {'path': path, 'value': None, 'hooks': 'absent', 'state': 'missing', 'error': err,
-          'script': None}
+          'script': None, 'prompt_hook': False}
     if err:
         st['state'] = 'invalid'
         return st
@@ -1853,8 +2844,10 @@ def claude_wiring_state(root, memdir):
         st['state'] = 'ok'
     else:
         st['state'] = 'elsewhere'
-    n = len(our_hook_events(obj) & set(e for e, _, _ in HOOK_EVENTS))
+    events = our_hook_events(obj)
+    n = len(events & set(e[0] for e in HOOK_EVENTS))
     st['hooks'] = 'present' if n == len(HOOK_EVENTS) else ('partial' if n else 'absent')
+    st['prompt_hook'] = 'UserPromptSubmit' in events
     if n:
         missing = [p for p in hook_script_paths(obj) if not os.path.isfile(p)]
         st['script'] = ('missing (%s)' % ', '.join(missing)) if missing else 'ok'
@@ -1949,6 +2942,24 @@ def claude_root_warning(ctx):
             '`git init` this project to give it its own root' % ctx.claude_root)
 
 
+def prompt_hook_warning(path):
+    return ('the UserPromptSubmit hook entry (preference capture) is missing in %s — run pmem init'
+            % path)
+
+
+def version_warnings():
+    """The stable hook copy's VERSION differs from this CLI's."""
+    stable = stable_hook_path()
+    if not os.path.isfile(stable) or os.path.realpath(stable) == os.path.realpath(__file__):
+        return []
+    theirs = script_version(stable)
+    if theirs == VERSION:
+        return []
+    return ['the hook script %s is pmem %s but this CLI is pmem %s — update every installed copy, '
+            'then run pmem init with the newest one' % (stable, theirs or 'of unknown version',
+                                                        VERSION)]
+
+
 def wiring_warnings(ctx):
     w = []
     if claude_root_refused(ctx):
@@ -1963,6 +2974,9 @@ def wiring_warnings(ctx):
                      % (st['path'], st['value'], ctx.memdir))
         elif st['state'] == 'invalid':
             w.append('%s: %s' % (st['path'], st['error']))
+        if st['hooks'] != 'absent' and not st['prompt_hook']:
+            w.append(prompt_hook_warning(st['path']))
+    w += version_warnings()
     wt = linked_worktree_containing(ctx.root, ctx.git)
     if wt:
         w.append('the memory dir %s is inside the linked worktree %s; `git worktree remove` would '
@@ -1985,11 +2999,25 @@ def fit(body, room):
     return body[:max(0, room - len(TRUNCATED_NOTE))] + TRUNCATED_NOTE
 
 
+def pref_context_parts(ctx):
+    """[inherited preferences section, outside-section list, skipped outer memories] (the first
+    two None when empty)."""
+    used, skipped = inherited_prefs(ctx)
+    inherited = capped_section(INHERIT_HEAD, inherited_lines(used))
+    try:
+        _, _, lines = read_index(ctx.memdir)
+    except PmemError:
+        lines = None
+    outside = capped_section(OUTSIDE_HEAD, outside_lines(ctx.memdir, lines)) if lines else None
+    return inherited, outside, skipped
+
+
 def assemble_context(ctx, key, with_index=False, with_others=True, with_warnings=True, cap=None,
-                     native_check=False):
-    """Handoff, checkpoint(s), other handoffs, pointer line (+ MEMORY.md). With ``cap`` only the
-    handoff and index bodies are truncated: warnings, checkpoints, the list of other handoffs and
-    the pointer line always survive."""
+                     native_check=False, with_prefs=False):
+    """Handoff, checkpoint(s), other handoffs, inherited preferences, pointer line (+ MEMORY.md).
+    With ``cap`` the fixed parts are first trimmed to cap/2, then only the handoff and index
+    bodies are truncated: the handoff always survives, so do the pointer line and (shortened)
+    warnings, checkpoints and the list of other handoffs."""
     memdir = ctx.memdir
     warns = wiring_warnings(ctx) if with_warnings else []
     if native_check:
@@ -2016,7 +3044,10 @@ def assemble_context(ctx, key, with_index=False, with_others=True, with_warnings
     else:
         hbody = ('(no handoff for workstream "%s" yet — create it with `pmem handoff path`)' % key)
     hhead = '## Current handoff (%s/%s)\n\n' % (MEMDIR, rel)
-    fixed_after = checkpoint_sections(memdir, key, hts)
+    # fixed parts in trimming order (least important first); the pointer line is never trimmed
+    fixed = collections.OrderedDict()
+    fixed['warnings'] = '\n'.join('WARNING (project memory): ' + w for w in warns) or None
+    fixed['checkpoints'] = '\n\n'.join(checkpoint_sections(memdir, key, hts)) or None
     if with_others:
         others = [handoff_info(k, p, memdir) for k, p in list_handoffs(memdir) if k != key]
         if others:
@@ -2026,9 +3057,20 @@ def assemble_context(ctx, key, with_index=False, with_others=True, with_warnings
                 for h in shown]
             if len(others) > len(shown):
                 lines.append('- ... and %d more — `pmem handoff list`' % (len(others) - len(shown)))
-            fixed_after.append('## Other handoffs\n' + '\n'.join(lines))
-    fixed_after.append('Project memory: %s — CLI: python3 %s (pmem); follow the project-memory '
-                       'skill; update the handoff at milestones.' % (memdir, shell_quote(cli_path())))
+            fixed['others'] = '## Other handoffs\n' + '\n'.join(lines)
+    if with_prefs:
+        try:
+            fixed['inherited'], fixed['outside'], skipped = pref_context_parts(ctx)
+            if skipped:
+                warns.append('outer memory %s is skipped, so its preferences are not inherited: %s%s'
+                             % (skipped[0][0], skipped[0][1], ' (and %d more — pmem pref list)'
+                                % (len(skipped) - 1) if len(skipped) > 1 else ''))
+                fixed['warnings'] = '\n'.join('WARNING (project memory): ' + w for w in warns)
+        except Exception as e:   # never lose the handoff over the preferences
+            fixed['inherited'] = '%s\n(cannot list them: %s — run `pmem pref list`)' % (
+                INHERIT_HEAD, e)
+    pointer = ('Project memory: %s — CLI: python3 %s (pmem); follow the project-memory skill; update '
+               'the handoff at milestones.' % (memdir, shell_quote(cli_path())))
     ibody = None
     if with_index:
         try:
@@ -2039,16 +3081,24 @@ def assemble_context(ctx, key, with_index=False, with_others=True, with_warnings
             ibody = text.lstrip('\ufeff').rstrip('\n')
 
     def render(hb, ib):
-        parts = []
-        if warns:
-            parts.append('\n'.join('WARNING (project memory): ' + w for w in warns))
+        parts = [fixed['warnings']] if fixed['warnings'] else []
         parts.append(hhead + hb)
-        parts += fixed_after
+        parts += [fixed[k] for k in ('checkpoints', 'others', 'inherited', 'outside')
+                  if fixed.get(k)]
+        parts.append(pointer)
         if ib is not None:
             parts.append('## MEMORY.md\n\n' + ib)
         return '\n\n'.join(parts)
 
     if cap:
+        budget = cap // 2
+        for k in ('outside', 'inherited', 'others', 'checkpoints', 'warnings'):
+            excess = len(render('', '' if ibody is not None else None)) - budget
+            if excess <= 0:
+                break
+            part = fixed.get(k)
+            if part:
+                fixed[k] = fit(part, max(len(TRUNCATED_NOTE) + 80, len(part) - excess))
         room = cap - len(render('', '' if ibody is not None else None))
         hbody = fit(hbody, room)
         if ibody is not None:
@@ -2058,6 +3108,26 @@ def assemble_context(ctx, key, with_index=False, with_others=True, with_warnings
 
 # ---------------------------------------------------------------------------------------------
 # Commands: init
+
+def drop_group_write(path):
+    """chmod go-w a file or dir of yours that is group/world-writable (outer folders' preferences
+    are only inherited from memory dirs that are not). -> report line or None."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(st.st_mode) or not hasattr(os, 'getuid') or st.st_uid != os.getuid() \
+            or not st.st_mode & 0o022:
+        return None
+    old = stat.S_IMODE(st.st_mode)
+    try:
+        os.chmod(path, old & ~0o022)
+    except OSError as e:
+        return ('warning: %s is group- or world-writable and chmod go-w failed (%s); projects below '
+                'it will not inherit its preferences' % (path, e.strerror or e))
+    return ('chmod go-w %s (%04o -> %04o): projects below inherit preferences only from memory '
+            'dirs that are not group/world-writable' % (path, old, old & ~0o022))
+
 
 class Out(list):
     """Action log that prints as it goes (warnings/errors to stderr)."""
@@ -2217,7 +3287,7 @@ def cmd_init(args):
 
     # 2. files
     if not os.path.isdir(memdir):
-        os.makedirs(memdir)
+        os.makedirs(memdir, 0o755)
         out.append('created %s' % memdir)
     memdir = os.path.realpath(memdir)
     for fname, content in (('MEMORY.md', MEMORY_TEMPLATE),
@@ -2225,9 +3295,21 @@ def cmd_init(args):
         p = os.path.join(memdir, fname)
         if os.path.lexists(p):
             out.append('ok %s' % fname)
+            if fname == 'MEMORY.md':     # 1.1: the Preferences section, feedback lines moved in
+                try:
+                    with memory_lock(memdir):
+                        out.extend(update_index_locked(
+                            memdir, lambda lines, eol: migrate_index(memdir, lines, eol, 'init')))
+                except PmemError as e:
+                    out.append('warning: MEMORY.md not migrated to 1.1 (no ## Preferences '
+                               'section): %s' % e)
         else:
             atomic_write(p, enc(content), memdir=memdir)
             out.append('created %s' % p)
+    for p in (memdir, os.path.join(memdir, 'MEMORY.md')):
+        msg = drop_group_write(p)
+        if msg:
+            out.append(msg)
     for d in ('.archive', '.checkpoints'):
         p = os.path.join(memdir, d)
         if os.path.isdir(p):
@@ -2286,7 +3368,11 @@ def cmd_init(args):
     # 7. children of a non-git workspace
     if not top and not args.no_children and not args.no_claude:
         problems = wire_children(root, memdir, args, out, [claude_root], cache)
-    if not any(l.startswith(('created', 'updated', 'installed', 'excluded', 'snapshot', 'replaced'))
+    w = register_memdir(memdir)
+    if w:
+        out.append('warning: ' + w)
+    if not any(l.startswith(('created', 'updated', 'installed', 'excluded', 'snapshot', 'replaced',
+                             'moved', 'dropped', 'chmod'))
                for l in out):
         print('ok — nothing to change')
     return 1 if problems else 0
@@ -2548,11 +3634,46 @@ def legacy_harness(ctx):
     return found
 
 
-def block_present(path):
+def block_present(path, marker=WIRE_BEGIN):
+    """True if the file has the marker line (BOM-aware; fenced code ignored)."""
     try:
-        return any(l.rstrip() == WIRE_BEGIN for l in read_text(path).split('\n'))
+        raw = read_bytes(path)
     except OSError:
         return False
+    _, lines = text_lines(raw)
+    return bool(marker_lines([c for c, _ in lines], marker))
+
+
+def block_outdated(path):
+    """True if the file's project-memory block is not this version's WIRE_BLOCK (EOL and trailing
+    whitespace ignored); False without a (well-formed) block."""
+    try:
+        raw = read_bytes(path)
+    except OSError:
+        return False
+    _, lines = text_lines(raw)
+    if block_problem(lines):
+        return False
+    contents = [c for c, _ in lines]
+    b, e = marker_lines(contents, WIRE_BEGIN), marker_lines(contents, WIRE_END)
+    if not b or not e:
+        return False
+    return ([c.rstrip() for c in contents[b[0]:e[0] + 1]]
+            != [l.rstrip() for l in WIRE_BLOCK.rstrip('\n').split('\n')])
+
+
+def rewire_command(path):
+    """The `pmem wire …` command that rewrites the block in ``path``."""
+    real = os.path.realpath(path)
+    if real == os.path.realpath(codex_agents_path()):
+        return 'pmem wire codex'
+    if os.path.basename(path) == 'CLAUDE.md':
+        dirs = claude_config_dirs(both=True)
+        for k, d in enumerate(dirs):
+            if real == os.path.realpath(os.path.join(d, 'CLAUDE.md')):
+                return 'pmem wire claude' + ('' if k == 0 and d == claude_config_dirs()[0]
+                                             else ' --config-dir %s' % shell_quote(d))
+    return 'pmem wire %s' % shell_quote(path)
 
 
 def codex_agents_path():
@@ -2595,6 +3716,51 @@ def memories_by_type(memdir):
         t = mf.type if mf.type in TYPES else ('invalid' if mf.type else 'untyped')
         counts[t] = counts.get(t, 0) + 1
     return counts
+
+
+def pref_status(ctx, lines, hints, warnings):
+    """Preferences summary for `pmem status` (adds hints and warnings)."""
+    memdir = ctx.memdir
+    lines = lines or []
+    sec = pref_section(lines) if lines else None
+    n = len(pref_entries(memdir, lines)) if sec else 0
+    used, skipped = inherited_prefs(ctx)
+    files = global_files()
+    rules = set()
+    for g in files:
+        rules.update(norm_rule(r) for r in g.rules())
+    info = collections.OrderedDict([
+        ('project', n), ('section', bool(sec)),
+        ('inherited', sum(len(e) for _, e in used)),
+        ('inherited_from', [m for m, _ in used]),
+        ('skipped', [collections.OrderedDict([('memory_dir', m), ('reason', r)]) for m, r in skipped]),
+        ('global', len(rules)), ('targets', [g.path for g in files]),
+        ('diverged', global_divergence(files)),
+        ('outside', [t for _, t, c in feedback_outside(memdir, lines) if c]),
+        ('no_entry_line', [t for _, t, c in feedback_outside(memdir, lines) if not c])])
+    if lines and not sec:
+        hints.append('preferences section missing in MEMORY.md → run pmem init')
+    if n > PREF_MAX_ENTRIES:
+        hints.append('%d preferences in ## Preferences (keep <= %d) → memory-health' % (
+            n, PREF_MAX_ENTRIES))
+    if info['outside']:
+        hints.append('%d feedback memor%s indexed outside ## Preferences (%s) → pmem index --fix%s' % (
+            len(info['outside']), 'y' if len(info['outside']) == 1 else 'ies',
+            ', '.join(info['outside'][:5]), '' if sec else ' after pmem init'))
+    if info['no_entry_line']:
+        hints.append('%d feedback memor%s without a `- [title](name.md) — rule` line (%s) → add one '
+                     'under ## Preferences by hand (pmem lint)' % (
+                         len(info['no_entry_line']), 'y' if len(info['no_entry_line']) == 1 else 'ies',
+                         ', '.join(info['no_entry_line'][:5])))
+    for m, r in skipped:
+        hints.append('outer memory %s skipped for inherited preferences: %s' % (m, r))
+    bad = [g for g in files if g.error]
+    for g in bad:
+        warnings.append('global preferences: %s: %s' % (g.path, g.error))
+    if info['diverged']:
+        warnings.append('the global preference blocks have diverged between %s — compare them by '
+                        'hand (`pmem pref list`); pmem never merges them' % ', '.join(info['targets']))
+    return info
 
 
 def cmd_status(args):
@@ -2707,6 +3873,11 @@ def cmd_status(args):
     if st['script'] and st['script'] != 'ok':
         warnings.append('Claude hooks are present but their script is %s → run `pmem init`'
                         % st['script'])
+    if st['hooks'] != 'absent' and not st['prompt_hook']:
+        warnings.append(prompt_hook_warning(st['path']))
+    stable = stable_hook_path()
+    info['stable_copy'] = {'path': stable, 'version': script_version(stable), 'cli': VERSION}
+    warnings += version_warnings()
     eff = native_memory_off(ctx)
     dream = 'unset'
     for label, path in settings_layers(ctx.claude_root):  # the first layer setting it wins
@@ -2755,6 +3926,14 @@ def cmd_status(args):
     if harness:
         hints.append('legacy learn/reflect/evolve harness found (%s) → see the migration section of '
                      'the project-memory skill' % ', '.join(harness))
+    seen_blocks = set()
+    for path in [g.path for g in global_files() if g.main] + project_agents[:1]:
+        if os.path.realpath(path) in seen_blocks:
+            continue
+        seen_blocks.add(os.path.realpath(path))
+        if block_outdated(path):
+            warnings.append('the project-memory block in %s is from another pmem version → %s'
+                            % (path, rewire_command(path)))
     if not codex['block'] and not codex['project_block']:
         hints.append('Codex: no project-memory block in %s or the project\'s AGENTS.md → pmem wire '
                      'codex' % agents)
@@ -2762,6 +3941,8 @@ def cmd_status(args):
         hints.append('Claude: no project-memory block in %s → pmem wire claude' % cglobal)
     if codex['hint']:
         hints.append(codex['hint'])
+    prefs = pref_status(ctx, lines, hints, warnings)
+    info['preferences'] = prefs
     info['errors'], info['warnings'], info['hints'] = errors, warnings, hints
     if args.json:
         print(json.dumps(clean_json(info), indent=2))
@@ -2817,6 +3998,10 @@ def cmd_status(args):
     p('codex block:    %s' % codex_txt)
     p('claude block:   %s (%s)' % ('present' if info['claude_global']['block'] else 'missing',
                                    cglobal))
+    p('preferences:    %d project, %d inherited (%d skipped), %d global (%s%s)' % (
+        prefs['project'], prefs['inherited'], len(prefs['skipped']), prefs['global'],
+        ('targets ' + ', '.join(prefs['targets'])) if prefs['targets'] else 'no targets',
+        '; diverged' if prefs['diverged'] else ''))
     for e in errors:
         p('ERROR: ' + e)
     for w in warnings:
@@ -2833,7 +4018,7 @@ def cmd_context(args):
     ctx = resolve(args.C)
     require_memory(ctx)
     key = workstream_key(ctx, args.key)
-    print(assemble_context(ctx, key, with_index=True))
+    print(assemble_context(ctx, key, with_index=True, with_prefs=True))
     return 0
 
 
@@ -2907,6 +4092,25 @@ def create_exclusive(path, data, memdir=None):
     return True
 
 
+def memory_text(memdir, path, name, description, mtype, body=None, meta=None, exists=True):
+    """New text of a memory file rewritten like `add --force`: unknown frontmatter keys and the
+    body (unless ``body`` is given) are kept, so are CRLF line endings. ``meta``: metadata keys
+    to set (replacing existing ones)."""
+    old, eol = None, '\n'
+    if exists:
+        mf = MemFile(path, memdir)
+        if mf.error:
+            raise PmemError('cannot read %s: %s' % (path, mf.error), 1)
+        old = mf.fm if mf.closed else None
+        if body is None:
+            body = mf.body.lstrip('\r\n') if mf.closed else mf.text
+        if mf.text.split('\n', 1)[0].endswith('\r'):
+            eol = '\r\n'
+    body = (body or '').replace('\r\n', '\n')
+    text = render_memory(name, description, mtype, now_utc_iso(), body, old, meta)
+    return text.replace('\n', eol) if eol != '\n' else text
+
+
 def cmd_add(args):
     if not NAME_RE.match(args.name) or args.name.lower() in RESERVED_STEMS:
         raise PmemError('NAME must match ^[a-z0-9][a-z0-9-]*$ and not be "memory"/"handoff": %r'
@@ -2920,20 +4124,51 @@ def cmd_add(args):
         body = dec(sys.stdin.buffer.read())
     elif args.body is not None:
         body = args.body
-    line = index_line(args.title or args.name, fname, args.description)
+    feedback = args.type == 'feedback'
+    if feedback and oneline(args.description):    # built like `pmem pref add` builds entries
+        line = entry_line(args.title or args.name, fname, oneline(args.description))
+    else:
+        line = index_line(args.title or args.name, fname, args.description)
     if line_target(line) != fname:
         line = index_line(args.name, fname, args.description)
+    notes = []
 
     def edit(lines, eol):
-        idx = [i for i, t in link_lines(lines) if nfc(t) == nfc(fname)]
-        if not idx:
-            append_line(lines, line, eol)
-            return 'indexed'
-        if args.force:
-            lines[idx[0]][0] = line
-            for i in reversed(idx[1:]):
-                del lines[i]
-        return 'index ok'
+        prob = unclosed_problem([c for c, _ in lines])
+        if prob:
+            notes.append('warning: MEMORY.md:%d opens %s that never closes, which %s everything after '
+                         'it (this line too) — close it with %s' % (
+                             prob[1], UNCLOSED_WHAT[prob[0]],
+                             'hides' if prob[0] == 'HTML comment' else 'turns into code',
+                             UNCLOSED_CLOSE[prob[0]]))
+        masked = mask_lines([c for c, _ in lines])
+        sec = pref_section(lines, masked)
+        mine = [e for e in section_entries(lines, sec, masked) if e.target
+                and nfc(e.target) == nfc(fname)] if sec else []
+        canon = [i for i, t in canonical_lines(lines, masked) if nfc(t) == nfc(fname)]
+        res = 'index ok'
+        if mine:
+            e = next((x for x in mine if x.canonical), mine[0])
+            if feedback:          # a preference entry keeps its rule text
+                res = 'kept preference line'
+            elif not e.canonical:
+                res = 'index ok'
+            else:   # no longer a feedback memory: its line (new text) goes under Memories
+                block = [[line, eol]] + [[c, eol] for c, _ in remove_entry(lines, e)[1:]]
+                append_ordinary(lines, eol, block)
+                res = 'moved its index line from ## Preferences to %s' % MEMORIES_HEADING
+        elif canon and args.force:
+            lines[canon[0]][0] = line   # other references to it stay where they are
+        if feedback:
+            notes.extend(migrate_index(memdir, lines, eol, 'add'))
+        if not mine and not canon:
+            sec = pref_section(lines)
+            if feedback and sec:
+                section_insert(lines, eol, sec, [[line, eol]])
+            else:
+                append_ordinary(lines, eol, line)
+            res = 'indexed'
+        return res
 
     with memory_lock(memdir):
         read_index(memdir)            # an unreadable index stops us before any write
@@ -2942,20 +4177,8 @@ def cmd_add(args):
         if exists and not args.force:
             raise PmemError('%s already exists — update it by hand, or rerun with --force to rewrite '
                             'it' % path, 2)
-        old, eol = None, '\n'
-        if exists:
-            mf = MemFile(path, memdir)
-            if mf.error:
-                raise PmemError('cannot read %s: %s' % (path, mf.error), 1)
-            old = mf.fm if mf.closed else None
-            if body is None:
-                body = mf.body.lstrip('\r\n') if mf.closed else mf.text
-            if mf.text.split('\n', 1)[0].endswith('\r'):
-                eol = '\r\n'
-        body = (body or '').replace('\r\n', '\n')
-        text = render_memory(args.name, args.description, args.type, now_utc_iso(), body, old)
-        if eol != '\n':
-            text = text.replace('\n', eol)
+        text = memory_text(memdir, path, args.name, args.description, args.type, body,
+                           exists=exists)
         if exists:
             atomic_write(path, enc(text), memdir=memdir)
         elif not create_exclusive(path, enc(text), memdir):
@@ -2963,9 +4186,12 @@ def cmd_add(args):
                             'it' % path, 2)
         res = update_index_locked(memdir, edit)
     print('%s %s (%s)' % ('rewrote' if exists else 'added', path, res))
-    if len(line) > INDEX_LINE_CHARS:
+    for n in notes:
+        (eprint('pmem: ' + n) if n.startswith('warning:') else print(n))
+    limit = PREF_LINE_WARN if feedback else INDEX_LINE_CHARS
+    if len(line) > limit and res != 'kept preference line':
         warn('its index line has %d chars (> %d; `pmem lint` warns) — shorten -d/--title'
-             % (len(line), INDEX_LINE_CHARS))
+             % (len(line), limit))
     snapshot(memdir, 'add %s' % args.name)
     return 0
 
@@ -3009,6 +4235,13 @@ def cmd_find(args):
     return 0
 
 
+def feedback_outside(memdir, lines, cache=None):
+    """[(line number, file, canonical)] of feedback memories with no entry in the Preferences
+    section that are referenced outside it (all of them when there is no section): their
+    canonical index line, else (canonical False) their first other reference."""
+    return feedback_refs(memdir, lines, cache)[0]
+
+
 def cmd_index(args):
     ctx = resolve(args.C)
     memdir = require_memory(ctx)
@@ -3019,10 +4252,13 @@ def cmd_index(args):
             actions.insert(0, 'created MEMORY.md from the template')
         for a in actions:
             print(a)
-        if actions:
+        if [a for a in actions if not a.startswith('note: ')]:
             snapshot(memdir, 'index --fix')
-        else:
+        elif not actions:
             print('ok — index is consistent')
+        _, _, lines = read_index(memdir)
+        if lines is not None and not pref_section(lines):
+            print('preferences section missing — run pmem init')
         return 0
     text, _, lines = read_index(memdir)
     if text is None:
@@ -3030,6 +4266,16 @@ def cmd_index(args):
         return 1
     a = analyze_index(memdir, lines)
     problems = 0
+    n = unclosed_comment([c for c, _ in lines])
+    if n:
+        print('unclosed HTML comment at MEMORY.md:%d — close it with --> (it hides the rest of the '
+              'index)' % n)
+        problems += 1
+    n = unclosed_fence([c for c, _ in lines])
+    if n:
+        print('unclosed code fence at MEMORY.md:%d — close it with ``` (it turns the rest of the '
+              'index into code)' % n)
+        problems += 1
     for f in a['unindexed']:
         print('unindexed: %s' % f)
         problems += 1
@@ -3046,6 +4292,17 @@ def cmd_index(args):
     elif a['handoff'] == 'not-first':
         print('handoff line: MEMORY.md:%d is not the first link line' % a['handoff_line'])
         problems += 1
+    has_sec = bool(pref_section(lines))
+    for ln, t, canonical in feedback_outside(memdir, lines):
+        if canonical:
+            print('feedback memory %s indexed outside ## Preferences (MEMORY.md:%d)' % (t, ln))
+            if has_sec:
+                problems += 1
+        else:
+            print('feedback memory %s has no canonical index line (only MEMORY.md:%d refers to it) — '
+                  'add `- [title](%s) — rule` under ## Preferences by hand' % (t, ln, t))
+    if not has_sec:
+        print('preferences section missing — run pmem init')
     if problems:
         print('run `pmem index --fix` to repair')
         return 1
@@ -3075,11 +4332,22 @@ def cmd_archive(args):
             warn('the worktree of %s.md still exists; its next session starts a fresh handoff' % rel)
     fnames = set(nfc(n + '.md') for n in names if '/' not in n)
 
+    removed_prefs = []
+    left = []
+
     def edit(lines, eol):
-        drop = [i for i, t in link_lines(lines) if nfc(t) in fnames]
-        for i in reversed(drop):
-            del lines[i]
-        return len(drop)
+        entries = dict((e.idx, e) for e in pref_entries(memdir, lines))
+        hits = [i for i, t in canonical_lines(lines) if nfc(t) in fnames]
+        for i in reversed(hits):
+            e = entries.get(i)
+            if e is not None:     # a preference entry goes with its continuation lines
+                remove_entry(lines, e)
+                removed_prefs.insert(0, e.rule)
+            else:
+                del lines[i]
+        # prose, blockquotes and other bullets that mention it are never deleted
+        left.extend((i + 1, t) for i, t in link_lines(lines) if nfc(t) in fnames)
+        return len(hits)
 
     moved = []
     with memory_lock(memdir):
@@ -3110,9 +4378,721 @@ def cmd_archive(args):
         print('archived %s.md → %s/%s' % (rel, MEMDIR, os.path.relpath(dest, memdir)))
     if fnames:
         print('dropped %d index line(s)' % dropped)
+    for rule in removed_prefs:
+        print('removed preference: %s' % rule)
+    if left:
+        print('left %d other line(s) that link to it in place: %s — edit them by hand (they now '
+              'link to a missing file)' % (len(left), ', '.join('MEMORY.md:%d (%s)' % x for x in left)))
     snapshot(memdir, 'archive %s%s' % (' '.join(names),
                                        (' — ' + oneline(args.reason)) if args.reason else ''))
     return 0
+
+
+# ---------------------------------------------------------------------------------------------
+# Commands: pref
+
+VIOL_HEAD_RE = re.compile(r'^\*\*Violations:\*\*\s*$')
+VIOL_ITEM_RE = re.compile(r'^\s*-\s+\d{4}-\d{2}-\d{2}\b')
+
+
+def violations_block(body_lines):
+    """(start, end) of the `**Violations:**` line and its list, else None."""
+    for i, line in enumerate(body_lines):
+        if VIOL_HEAD_RE.match(line.strip()):
+            j = i + 1
+            while j < len(body_lines) and body_lines[j].strip() and (
+                    body_lines[j].lstrip().startswith('- ') or body_lines[j][:1] in (' ', '\t')):
+                j += 1
+            return i, j
+    return None
+
+
+def violation_count(body):
+    lines = body.replace('\r\n', '\n').split('\n')
+    blk = violations_block(lines)
+    return len([l for l in lines[blk[0] + 1:blk[1]] if VIOL_ITEM_RE.match(l)]) if blk else 0
+
+
+def add_violation(body, note):
+    """Body with ``- <today>: note`` appended to its **Violations:** list. -> (body, count)."""
+    lines = body.replace('\r\n', '\n').rstrip('\n').split('\n') if body.strip() else []
+    item = '- %s: %s' % (today(), oneline(note))
+    blk = violations_block(lines)
+    if blk:
+        lines[blk[1]:blk[1]] = [item]
+    else:
+        if lines and lines[-1].strip():
+            lines.append('')
+        lines += ['**Violations:**', item]
+    text = '\n'.join(lines) + '\n'
+    return text, violation_count(text)
+
+
+def pref_body(rule, why, how, old_body=None):
+    body = '%s\n\n**Why:** %s\n**How to apply:** %s\n' % (rule, oneline(why) or '(not recorded)',
+                                                         oneline(how) or '(not recorded)')
+    if old_body:
+        lines = old_body.replace('\r\n', '\n').split('\n')
+        blk = violations_block(lines)
+        if blk:
+            body += '\n' + '\n'.join(lines[blk[0]:blk[1]]) + '\n'
+    return body
+
+
+WHY_LINE_RE = re.compile(r'^\s*\*\*Why:\*\*')
+HOW_LINE_RE = re.compile(r'^\s*\*\*How to apply:\*\*')
+
+
+def replace_rule_line(lines, olds, rule):
+    """Replace the first non-blank body line with ``rule`` when it equals (normalized) one of
+    ``olds`` or the rule itself. -> its index, or None when it was left alone (or missing)."""
+    keys = set(norm_rule(o) for o in olds if o and norm_rule(o))
+    keys.add(norm_rule(rule))
+    first = next((i for i, l in enumerate(lines) if l.strip()), None)
+    if first is not None and norm_rule(lines[first]) in keys:
+        lines[first] = rule
+        return first
+    return None
+
+
+def refresh_pref_body(old_body, rule, olds, why=None, how=None):
+    """Body of an existing memory recorded again with `pref add --force`: a first line equal to
+    an old rule or description becomes RULE (else RULE is put first); only the Why/How lines that
+    were given are written; everything else (other Why/How lines, **Violations:**, notes) stays."""
+    lines = old_body.replace('\r\n', '\n').strip('\n').split('\n') if old_body.strip() else []
+    first = replace_rule_line(lines, olds, rule)
+    if first is None:
+        lines[0:0] = [rule, ''] if lines else [rule]
+        first = 0
+    for regex, label, value in ((WHY_LINE_RE, '**Why:**', why),
+                                (HOW_LINE_RE, '**How to apply:**', how)):
+        value = oneline(value or '')
+        if not value:
+            continue
+        new = '%s %s' % (label, value)
+        at = next((i for i, l in enumerate(lines) if regex.match(l)), None)
+        if at is not None:
+            lines[at] = new
+            continue
+        why_at = next((i for i, l in enumerate(lines) if WHY_LINE_RE.match(l)), None)
+        how_at = next((i for i, l in enumerate(lines) if HOW_LINE_RE.match(l)), None)
+        if regex is HOW_LINE_RE and why_at is not None:
+            lines.insert(why_at + 1, new)
+        elif regex is WHY_LINE_RE and how_at is not None:
+            lines.insert(how_at, new)
+        else:                         # a new paragraph right after the rule's paragraph
+            j = first + 1
+            while j < len(lines) and lines[j].strip():
+                j += 1
+            lines[j:j] = ['', new] + ([''] if j < len(lines) else [])
+    return '\n'.join(lines) + '\n'
+
+
+def default_pref_name(rule):
+    words = re.findall(r'[A-Za-z0-9]+', rule)[:6]
+    name = '-'.join(w.lower() for w in words)[:64].strip('-')
+    if not name or not NAME_RE.match(name) or name in RESERVED_STEMS:
+        name = 'pref-' + hashlib.sha256(enc(rule)).hexdigest()[:8]
+    return name
+
+
+def is_cjk(ch):
+    o = ord(ch)
+    return (0x3040 <= o <= 0x30ff or 0x3400 <= o <= 0x4dbf or 0x4e00 <= o <= 0x9fff
+            or 0xf900 <= o <= 0xfaff or 0xac00 <= o <= 0xd7af or 0x20000 <= o <= 0x2fa1f)
+
+
+def check_part(arg, what='preference'):
+    """RULE given as part of a rule must be long enough to pick one: >= 4 characters, >= 2 when
+    it has CJK characters. Exit 2 otherwise."""
+    a = (arg or '').strip()
+    if len(a) < (2 if any(is_cjk(c) for c in a) else 4):
+        raise PmemError('no %s is exactly %r, and a part of a rule must have at least 4 characters '
+                        '(2 for CJK) — give more of the rule (see `pmem pref list`)' % (what, a), 2)
+
+
+def match_entry(entries, arg, what='preference'):
+    """The entry for NAME or RULE: backed by NAME.md, else the same normalized rule, else a unique
+    case-insensitive substring (>= 4 characters, 2 for CJK) of a rule. Exit 2 when empty, too
+    short, ambiguous or not found."""
+    arg = (arg or '').strip()
+    if not arg:
+        raise PmemError('NAME|RULE is empty', 2)
+    if NAME_RE.match(arg):
+        named = [e for e in entries if e.name == arg]
+        if named:
+            return next((e for e in named if editable(e)), named[0])
+    key = norm_rule(arg)
+    for e in entries:
+        if key and norm_rule(e.rule) == key:
+            return e
+    check_part(arg, what)
+    hits = [e for e in entries if arg.casefold() and arg.casefold() in e.rule.casefold()]
+    if not hits and key:
+        hits = [e for e in entries if key in norm_rule(e.rule)]
+    keys = set(norm_rule(e.rule) for e in hits)
+    if len(keys) > 1:
+        raise PmemError('%r matches several %ss — be more specific:\n%s' % (
+            arg, what, '\n'.join('  - %s' % e.rule for e in hits)), 2)
+    if not hits:
+        raise PmemError('no %s matches %r (see `pmem pref list`)' % (what, arg), 2)
+    return hits[0]
+
+
+def read_index_for_pref(memdir):
+    """(text, bom, lines) for a pref command; refuses an index with an unclosed comment or code
+    fence."""
+    text, bom, lines = read_index(memdir)
+    if text is None:
+        text, bom, lines = '', False, to_lines(MEMORY_TEMPLATE)
+    err = unclosed_error(lines)
+    if err:
+        raise err
+    return text, bom, lines
+
+
+def write_index(memdir, text, bom, lines):
+    new = ('﻿' if bom else '') + from_lines(lines)
+    if new != text:
+        atomic_write(os.path.join(memdir, 'MEMORY.md'), enc(new), memdir=memdir)
+
+
+def unprefer_file(memdir, fname):
+    """A feedback memory that no longer backs a preference becomes a `project` memory, else the
+    next migration would move its index line back into Preferences. -> True if retyped."""
+    path = os.path.join(memdir, fname)
+    mf = MemFile(path, memdir)
+    if mf.error or not mf.closed or mf.type != 'feedback':
+        return False
+    atomic_write(path, enc(memory_text(memdir, path, mf.name or mf.stem, mf.description,
+                                       'project')), memdir=memdir)
+    return True
+
+
+def index_as_ordinary(memdir, lines, eol, fname):
+    """Give a memory an ordinary index line under Memories unless it has one."""
+    if any(nfc(t) == nfc(fname) for _, t in link_lines(lines)):
+        return
+    line = generated_index_line(os.path.join(memdir, fname))
+    if line_target(line) != fname:
+        line = index_line(fname[:-3], fname, '')
+    append_ordinary(lines, eol, line)
+
+
+def demote_local_entry(memdir, lines, eol, e, report):
+    """Remove entry ``e``; its feedback file stays as an ordinary memory."""
+    remove_entry(lines, e)
+    if e.kind == 'pref':
+        if unprefer_file(memdir, e.target):
+            report.append('kept %s as an ordinary project memory (indexed under %s)'
+                          % (e.target, MEMORIES_HEADING))
+        index_as_ordinary(memdir, lines, eol, e.target)
+
+
+def add_preference(memdir, rule, name=None, title=None, why=None, how=None, force=False):
+    """Record a preference in ``memdir`` (caller holds the lock). -> report lines."""
+    report = []
+    text, bom, lines = read_index_for_pref(memdir)
+    eol = eol_of(lines)
+    report += [r for r in migrate_index(memdir, lines, eol, 'add')]
+    cache = {}
+    prefs = [e for e in classify(memdir, section_entries(lines), cache) if e.is_pref]
+    key = norm_rule(rule)
+    if name is None:
+        same = [e for e in prefs if e.name and norm_rule(e.rule) == key]
+        if same:
+            name = same[0].name
+        else:
+            base = default_pref_name(rule)
+            taken = set(name_key(f) for f in os.listdir(memdir))
+            taken |= set(name_key(t) for _, t in link_lines(lines))
+            name, n = base, 2
+            while name_key(name + '.md') in taken:
+                p = os.path.join(memdir, name + '.md')
+                if os.path.isfile(p) and memory_type(memdir, name + '.md', cache) == 'feedback' and \
+                        norm_rule(MemFile(p, memdir).description) == key:
+                    break     # a feedback file with this very rule, not indexed yet
+                name, n = '%s-%d' % (base, n), n + 1
+    fname = name + '.md'
+    path = guard(memdir, os.path.join(memdir, fname))
+    exists = os.path.lexists(path)
+    mtype = memory_type(memdir, fname, cache) if exists else None
+    if exists and mtype != 'feedback' and not force:
+        raise PmemError('%s exists as a %s memory — choose another --name, or rerun with --force to '
+                        'turn it into a feedback memory' % (fname, mtype or 'non-memory'), 2)
+    e1 = [e for e in prefs if e.target and nfc(e.target) == nfc(fname)]
+    e2 = [e for e in prefs if norm_rule(e.rule) == key and e not in e1]
+    conflicts = [e for e in e2 if e.target and e.kind == 'pref']
+    if conflicts and not force:
+        raise PmemError('already recorded as %s (%s/%s); rerun with --force to record it as %s '
+                        'instead' % (conflicts[0].name, memdir, conflicts[0].target, name), 2)
+    keep = next((e for e in e1 if e.canonical), None) or next((e for e in e2 if editable(e)), None)
+    report += [left_in_place(e) for e in e1 + e2 if e is not keep and not editable(e)]
+    if keep is not None and keep in e1 and not title:
+        new_line = entry_with_rule(keep, rule)
+    else:
+        new_line = entry_line(title or name.replace('-', ' ')[:40], fname, rule)
+    # every other entry for this rule and every other canonical index line of this file goes
+    # (their continuation lines move to the kept entry); other references stay where they are
+    drop, carried = set(), []
+
+    def take(a, b):
+        drop.update(range(a, b))
+        carried.extend([lines[k][0], eol] for k in range(a + 1, b))
+    for e in e1 + e2:
+        if e is not keep and not (e.target and not e.canonical):
+            take(e.idx, e.end)
+    sec = pref_section(lines)
+    for i, t in canonical_lines(lines):
+        if nfc(t) == nfc(fname) and (keep is None or i != keep.idx) and i not in drop:
+            a, b = entry_block(lines, i)
+            take(a, min(b, sec[1]) if sec and sec[0] < i < sec[1] else b)
+    if keep is not None:
+        drop.difference_update(range(keep.idx, keep.end))
+        lines[keep.idx][0] = new_line
+        lines[keep.end:keep.end] = carried
+        shift = len(carried)
+        drop = set(i + shift if i >= keep.end else i for i in drop)
+        carried = []
+    lines[:] = [l for i, l in enumerate(lines) if i not in drop]
+    if keep is None:
+        section_insert(lines, eol, pref_section(lines), [[new_line, eol]] + carried)
+    conflicts = [e for e in conflicts if editable(e)]   # the others stay as they are
+    for e in conflicts:      # replaced with --force: their files get ordinary index lines
+        index_as_ordinary(memdir, lines, eol, e.target)
+    # files first (NAME.md, then the displaced ones), then the index
+    if not exists:
+        body = pref_body(rule, why, how)
+        if not create_exclusive(path, enc(render_memory(name, rule, 'feedback', now_utc_iso(), body)),
+                                memdir):
+            raise PmemError('%s appeared meanwhile — rerun' % path, 1)
+        report.append('created %s' % path)
+    elif force:
+        mf = MemFile(path, memdir)
+        if mf.error:
+            raise PmemError('cannot read %s: %s' % (path, mf.error), 1)
+        old_body = mf.body.lstrip('\r\n') if mf.closed else mf.text
+        olds = [mf.description] + [e.rule for e in e1]
+        body = refresh_pref_body(old_body, rule, olds, why, how)
+        atomic_write(path, enc(memory_text(memdir, path, name, rule, 'feedback', body)),
+                     memdir=memdir)
+        report.append('rewrote %s (description and first line; the rest of the body kept)' % path)
+    else:
+        report.append('kept %s' % path)
+    for e in conflicts:
+        if unprefer_file(memdir, e.target):
+            report.append('%s no longer backs a preference: kept as an ordinary project memory'
+                          % e.target)
+    write_index(memdir, text, bom, lines)
+    report.append('%s preference: %s' % ('replaced' if keep is not None else 'added', rule))
+    if len(new_line) > PREF_LINE_WARN:
+        report.append('warning: the entry has %d chars (> %d; `pmem lint` warns) — shorten the rule '
+                      'or --title' % (len(new_line), PREF_LINE_WARN))
+    return report
+
+
+def print_report(report):
+    for r in report:
+        if r.startswith('warning:'):
+            eprint('pmem: ' + r)
+        else:
+            print(r)
+
+
+def pref_memdir(ctx, up):
+    memdir = require_memory(ctx)
+    if not up:
+        return memdir
+    used, skipped = outer_memdirs(ctx.root, ctx.home)
+    if not used:
+        why = ''.join('; skipped %s: %s' % s for s in skipped)
+        raise PmemError('--up: no usable memory dir above %s%s' % (ctx.root, why), 2)
+    return used[0]
+
+
+def cmd_pref_add(args):
+    rule = check_rule(args.rule)
+    if args.name is not None and (not NAME_RE.match(args.name) or args.name in RESERVED_STEMS):
+        raise PmemError('--name must match ^[a-z0-9][a-z0-9-]*$ and not be "memory"/"handoff": %r'
+                        % args.name, 2)
+    ctx = resolve(args.C)
+    memdir = pref_memdir(ctx, args.up)
+    with memory_lock(memdir):
+        report = add_preference(memdir, rule, args.name, args.title, args.why, args.how, args.force)
+    print_report(report)
+    w = register_memdir(memdir)
+    if w:
+        warn(w)
+    snapshot(memdir, 'pref add %s' % oneline(rule)[:60])
+    return 0
+
+
+def cmd_pref_remove(args):
+    ctx = resolve(args.C)
+    memdir = require_memory(ctx)
+    report = []
+    with memory_lock(memdir):
+        text, bom, lines = read_index_for_pref(memdir)
+        e = match_entry(pref_entries(memdir, lines), args.what)
+        if not editable(e):
+            raise PmemError('%s — make it one by hand, then rerun; nothing removed' % not_canonical(e),
+                            2)
+        demote_local_entry(memdir, lines, eol_of(lines), e, report)
+        write_index(memdir, text, bom, lines)
+    print('removed preference: %s' % e.rule)
+    print_report(report)
+    snapshot(memdir, 'pref remove %s' % (e.name or oneline(e.rule)[:60]))
+    return 0
+
+
+def cmd_pref_violated(args):
+    new_rule = check_rule(args.rule)
+    ctx = resolve(args.C)
+    memdir = pref_memdir(ctx, args.up)
+    if args.up:     # the nearest outer memory that has the entry
+        memdir = next((m for m, ents in inherited_prefs(ctx)[0]
+                       if any(x.name == args.name for x in ents)), memdir)
+    with memory_lock(memdir):
+        text, bom, lines = read_index_for_pref(memdir)
+        hits = [e for e in pref_entries(memdir, lines) if e.name == args.name]
+        if not hits:
+            hint = ''
+            if not args.up:
+                outer = [m for m, ents in inherited_prefs(ctx)[0]
+                         if any(x.name == args.name for x in ents)]
+                if outer:
+                    hint = ('; it is inherited from %s — rerun with --up (or `pmem -C %s pref '
+                            'violated …`)' % (outer[0], shell_quote(os.path.dirname(outer[0]))))
+            raise PmemError('no preference entry for %s under ## Preferences in %s/MEMORY.md%s'
+                            % (args.name, memdir, hint), 2)
+        e = next((x for x in hits if editable(x)), hits[0])
+        if not editable(e):
+            raise PmemError('%s — make it one by hand, then rerun; nothing changed' % not_canonical(e),
+                            2)
+        if e.kind != 'pref':
+            raise PmemError('%s/%s is missing — restore it or record the rule again with `pmem pref '
+                            'add`' % (memdir, e.target), 1)
+        if norm_rule(new_rule) == norm_rule(e.rule):
+            raise PmemError('--rule must sharpen the rule: it is the same as the current one (%s)'
+                            % e.rule, 2)
+        path = os.path.join(memdir, e.target)
+        mf = MemFile(path, memdir)
+        if mf.error:
+            raise PmemError('cannot read %s: %s' % (path, mf.error), 1)
+        body = mf.body.lstrip('\r\n') if mf.closed else mf.text
+        blines = body.replace('\r\n', '\n').split('\n')
+        if replace_rule_line(blines, [e.rule, mf.description], new_rule) is not None:
+            body = '\n'.join(blines)      # the body's first line was the old rule
+        body, count = add_violation(body, args.note or 'broke the rule "%s"' % e.rule)
+        new_text = memory_text(memdir, path, mf.name or args.name, new_rule, 'feedback', body,
+                               meta={'violations': count})
+        eol = eol_of(lines)
+        block = lines[e.idx:e.end]
+        block[0] = [entry_with_rule(e, new_rule), block[0][1] or eol]
+        del lines[e.idx:e.end]
+        section_insert(lines, eol, pref_section(lines), block, top=True)
+        atomic_write(path, enc(new_text), memdir=memdir)
+        write_index(memdir, text, bom, lines)
+    print('sharpened preference %s in %s/MEMORY.md: %s' % (args.name, memdir, new_rule))
+    print('was: %s' % e.rule)
+    print('moved it to the top of ## Preferences; violations: %d' % count)
+    if count >= 2:
+        print('hint: still broken after %d rewrites? ask the user how to phrase it' % count)
+    snapshot(memdir, 'pref violated %s' % args.name)
+    return 0
+
+
+def entry_json(e):
+    return collections.OrderedDict([('name', e.name), ('rule', e.rule), ('kind', e.kind),
+                                    ('line', e.idx + 1)])
+
+
+def global_json(files):
+    return [collections.OrderedDict([('path', g.path), ('error', g.error),
+                                     ('block', bool(g.main)), ('rules', g.rules() if not g.error
+                                                               else [])]) for g in files]
+
+
+def cmd_pref_list(args):
+    ctx = resolve(args.C)
+    info = collections.OrderedDict()
+    rc = 0
+    if ctx.memdir:
+        try:
+            text, _, lines = read_index(ctx.memdir)
+        except PmemError as e:
+            text, lines = None, None
+            eprint('pmem: %s' % e)
+        lines = lines or []
+        sec = pref_section(lines) if lines else None
+        info['project'] = collections.OrderedDict([
+            ('memory_dir', ctx.memdir), ('section', bool(sec)),
+            ('entries', [entry_json(e) for e in pref_entries(ctx.memdir, lines)]),
+            ('outside', [t for _, t, c in feedback_outside(ctx.memdir, lines) if c]),
+            ('no_entry_line', [t for _, t, c in feedback_outside(ctx.memdir, lines) if not c])])
+        used, skipped = inherited_prefs(ctx)
+        info['inherited'] = [collections.OrderedDict([('memory_dir', m), ('entries', [
+            entry_json(e) for e in entries])]) for m, entries in used]
+        info['skipped'] = [collections.OrderedDict([('memory_dir', m), ('reason', r)])
+                           for m, r in skipped]
+    else:
+        info['project'] = None
+        rc = 2 if ctx.bad_memdir else 1
+    files = global_files()
+    info['global'] = collections.OrderedDict([('targets', global_json(files)),
+                                              ('diverged', global_divergence(files))])
+    if args.all:
+        rows = []
+        for m in registered_memdirs():
+            entries = read_prefs(m)
+            rows.append(collections.OrderedDict([('memory_dir', m),
+                                                 ('entries', [entry_json(e) for e in entries])]))
+        info['all'] = rows
+    if args.json:
+        print(json.dumps(clean_json(info), indent=2))
+        return rc
+    p = print
+    p('Preferences in force — on conflict this project wins, then the nearest outer folder, then '
+      'the global block.')
+    if info['project'] is None:
+        p('')
+        p(str(refused_memdir_error(ctx)) if ctx.bad_memdir else
+          'no project memory (%s/) found from %s — run `pmem init` in the project root'
+          % (MEMDIR, ctx.start))
+    else:
+        pj = info['project']
+        p('')
+        p('project: %s/MEMORY.md%s' % (ctx.memdir, '' if pj['section'] else
+                                       '  (no ## Preferences section — run pmem init)'))
+        for e in pj['entries']:
+            p('  - %s%s' % (e['rule'], '  [%s]' % e['name'] if e['name'] else ''))
+        if not pj['entries']:
+            p('  (none)')
+        for t in pj['outside']:
+            p('  ! feedback memory %s is indexed outside the section — pmem index --fix' % t)
+        for t in pj['no_entry_line']:
+            p('  ! feedback memory %s has no `- [title](%s) — rule` line — add one under ## '
+              'Preferences by hand' % (t, t))
+        for d in info['inherited']:
+            p('inherited: %s/MEMORY.md' % d['memory_dir'])
+            for e in d['entries']:
+                p('  - %s%s' % (e['rule'], '  [%s]' % e['name'] if e['name'] else ''))
+            if not d['entries']:
+                p('  (none)')
+        for d in info['skipped']:
+            p('skipped: %s — %s' % (d['memory_dir'], d['reason']))
+    if not files:
+        p('global: no CLAUDE.md / AGENTS.md with the project-memory block (pmem wire codex|claude)')
+    for g in files:
+        p('global: %s%s' % (g.path, ' — ERROR: %s' % g.error if g.error else
+                            ('' if g.main else '  (no project-memory block)')))
+        for r in ([] if g.error else g.rules()):
+            p('  - %s' % r)
+        if not g.error and not g.rules():
+            p('  (none)')
+    if info['global']['diverged']:
+        p('WARN: the global preference blocks have diverged between these files — compare them by '
+          'hand; pmem never merges them')
+    if args.all:
+        p('')
+        p('all registered projects (%s):' % registry_path())
+        n = 0
+        for row in info['all']:
+            block = ['== %s' % row['memory_dir']] + ['  - %s' % e['rule'] for e in row['entries']]
+            if n + len(block) > LIST_ALL_MAX_LINES:
+                p('… truncated at %d lines' % LIST_ALL_MAX_LINES)
+                break
+            for line in block:
+                p(line)
+            n += len(block)
+        if not info['all']:
+            p('  (none registered — `pmem init` and `pmem pref add` register a project)')
+    return rc
+
+
+def global_targets(args, explicit):
+    """Phase 1 read + validation of the global files. -> files (exit 1 on any problem)."""
+    files = global_files(args.config_dir, explicit, getattr(args, 'only', False))
+    bad = [g for g in files if g.error]
+    if bad:
+        raise PmemError('nothing written: %s' % '; '.join('%s: %s' % (g.path, g.error) for g in bad), 1)
+    return files
+
+
+def check_plans(plans):
+    bad = []
+    for g, new in plans:
+        if new != g.raw:
+            why = writable_problem(g.path)
+            if why:
+                bad.append('%s: %s' % (g.path, why))
+    if bad:
+        raise PmemError('nothing written: %s' % '; '.join(bad), 1)
+
+
+def promote_bytes(g, rule):
+    if any(norm_rule(r) == norm_rule(rule) for r in g.rules()):
+        return g.raw
+    lines = [list(l) for l in g.lines]
+    eol = g.eol
+    if g.sub:
+        ents = g.entries()
+        j = ents[-1][1] if ents else g.sub[1]
+        lines[j:j] = [['- ' + rule, eol]]
+    else:
+        e = g.main[1]
+        block = [['', eol], [PREF_BEGIN, eol], [PREF_GLOBAL_HEADING, eol], ['- ' + rule, eol],
+                 [PREF_END, eol]]
+        if lines[e][1] == '':
+            lines[e][1] = eol
+            block[-1][1] = ''
+        elif e + 1 < len(lines) and lines[e + 1][0].strip():
+            block.append(['', eol])
+        lines[e + 1:e + 1] = block
+    return g.data(lines)
+
+
+def demote_bytes(g, key):
+    lines = [list(l) for l in g.lines]
+    for i, j, r in reversed(g.entries()):
+        if norm_rule(r) == key:
+            del lines[i:j]
+    return g.data(lines)
+
+
+def check_only(args):
+    if args.only and not (args.targets or args.config_dir):
+        raise PmemError('--only needs at least one --target FILE or --config-dir DIR', 2)
+
+
+def print_plans(plans, verb):
+    """--dry-run: every target file and the change."""
+    for g, new in plans:
+        if new == g.raw:
+            print('unchanged %s' % g.path)
+            continue
+        old_lines = set(c for c, _ in g.lines)
+        _, new_lines = text_lines(new)
+        print('would %s %s:' % (verb, g.path))
+        if verb == 'change':
+            for c, _ in new_lines:
+                if c not in old_lines:
+                    print('  + %s' % c)
+        new_set = set(c for c, _ in new_lines)
+        for c, _ in g.lines:
+            if c not in new_set:
+                print('  - %s' % c)
+
+
+def cmd_pref_promote(args):
+    check_only(args)
+    ctx = resolve(args.C)
+    memdir = require_memory(ctx)
+    _, _, lines = read_index_for_pref(memdir)
+    e = match_entry(pref_entries(memdir, lines), args.what)
+    rule = e.rule
+    files = global_targets(args, args.targets)
+    explicit = set(os.path.realpath(os.path.abspath(os.path.expanduser(t))) for t in args.targets)
+    missing = [g.path for g in files if not g.main and (args.only or
+                                                         os.path.realpath(g.path) in explicit)]
+    if missing:
+        raise PmemError('%s has no project-memory block — run `pmem wire %s` first; nothing written'
+                        % (missing[0], shell_quote(missing[0])), 1)
+    targets = [g for g in files if g.main]
+    if not targets:
+        raise PmemError('no global instruction file has the project-memory block — run `pmem wire '
+                        'codex` / `pmem wire claude` first; nothing written', 1)
+    plans = [(g, promote_bytes(g, rule)) for g in targets]
+    check_plans(plans)
+    if args.dry_run:
+        print('dry run — nothing written. `pmem pref promote` would write %d global file%s:'
+              % (len(targets), '' if len(targets) == 1 else 's'))
+        print_plans(plans, 'change')
+        if not args.keep_local:
+            print('and take the entry out of %s/MEMORY.md (its file stays as a project memory; '
+                  '--keep-local keeps it)' % memdir)
+        return 0
+    write_globals(plans)
+    print('promoted to %d global file%s (%s): %s' % (len(targets), '' if len(targets) == 1 else 's',
+                                                      ', '.join(g.path for g in targets), rule))
+    if args.keep_local:
+        print('kept the local entry (--keep-local)')
+        return 0
+    report = []
+    with memory_lock(memdir):
+        text, bom, lines = read_index_for_pref(memdir)
+        prefs = pref_entries(memdir, lines)
+        same = [x for x in prefs if (e.name and x.name == e.name)
+                or norm_rule(x.rule) == norm_rule(rule)]
+        report += [left_in_place(x) for x in same if not editable(x)]
+        same = [x for x in same if editable(x)]
+        if same:
+            demote_local_entry(memdir, lines, eol_of(lines), same[0], report)
+            write_index(memdir, text, bom, lines)
+            report.insert(0, 'removed the local entry from %s/MEMORY.md (the global block has it '
+                             'now)' % memdir)
+    print_report(report)
+    snapshot(memdir, 'pref promote %s' % (e.name or oneline(rule)[:60]))
+    return 0
+
+
+def cmd_pref_demote(args):
+    check_only(args)
+    if not (args.rule or '').strip():
+        raise PmemError('RULE is empty', 2)
+    files = global_targets(args, args.targets)
+    rows = [(g, r) for g in files for r in g.rules()]
+    key = norm_rule(args.rule)
+    hits = [x for x in rows if key and norm_rule(x[1]) == key]
+    if not hits:
+        check_part(args.rule, 'global preference')
+        part = args.rule.strip().casefold()
+        sub = [x for x in rows if part in x[1].casefold()]
+        if not sub and key:
+            sub = [x for x in rows if key in norm_rule(x[1])]
+        keys = collections.OrderedDict((norm_rule(r), r) for _, r in sub)
+        if len(keys) > 1:
+            raise PmemError('%r matches several global preferences — be more specific:\n%s'
+                            % (args.rule, '\n'.join('  - %s' % r for r in keys.values())), 2)
+        if not keys:
+            raise PmemError('no global preference matches %r (see `pmem pref list`)' % args.rule, 2)
+        key = list(keys)[0]
+        hits = [x for x in rows if norm_rule(x[1]) == key]
+    rule = hits[0][1]
+    plans = [(g, demote_bytes(g, key)) for g in files if any(norm_rule(r) == key for r in g.rules())]
+    check_plans(plans)
+    if args.dry_run:
+        print('dry run — nothing written. `pmem pref demote` would write %d global file%s:'
+              % (len(plans), '' if len(plans) == 1 else 's'))
+        print_plans(plans, 'change')
+        if args.to_project:
+            ctx = resolve(args.C)
+            print('and first add it to %s/MEMORY.md: %s' % (require_memory(ctx), rule))
+        return 0
+    memdir = None
+    if args.to_project:
+        ctx = resolve(args.C)
+        memdir = require_memory(ctx)
+        with memory_lock(memdir):
+            print_report(add_preference(memdir, check_rule(rule, check_len=False)))
+        print('recorded it in %s/MEMORY.md' % memdir)
+    write_globals(plans)
+    print('demoted from %d global file%s (%s): %s' % (len(plans), '' if len(plans) == 1 else 's',
+                                                       ', '.join(g.path for g, _ in plans), rule))
+    if memdir:
+        snapshot(memdir, 'pref demote %s' % oneline(rule)[:60])
+    return 0
+
+
+def cmd_pref(args):
+    func = {'list': cmd_pref_list, 'add': cmd_pref_add, 'remove': cmd_pref_remove,
+            'violated': cmd_pref_violated, 'promote': cmd_pref_promote,
+            'demote': cmd_pref_demote}.get(getattr(args, 'pref_cmd', None))
+    if func is None:
+        args.pref_parser.print_help(sys.stderr)
+        return 2
+    return func(args)
+
 
 
 # ---------------------------------------------------------------------------------------------
@@ -3199,6 +5179,64 @@ def wiki_links(text):
     return out
 
 
+def unquoted_colon(fm, key):
+    """True if the top-level ``key`` is a plain (unquoted) one-line YAML value containing ': '
+    or ending with ':' — invalid YAML that pmem itself tolerates."""
+    for kind, k, raw, _ in fm.entries:
+        if kind != 'top' or k != key:
+            continue
+        m = FM_KEY_RE.match(raw[0].rstrip())
+        rest = strip_yaml_comment(m.group(2) or '') if m else ''
+        if not rest or rest[0] in '"\'' or BLOCK_SCALAR_RE.match(rest):
+            return False
+        return bool(re.search(r':[ \t]', rest)) or rest.endswith(':')
+    return False
+
+
+def lint_preferences(f, memdir, lines, sec, entries, cache):
+    """Preferences checks of `pmem lint` (spec 1.1 §3.2-3.4, §7)."""
+    prefs = [e for e in entries if e.is_pref]
+    if not sec:
+        f.add('WARN', 'MEMORY.md', 'preferences section missing — run `pmem init` (it adds '
+              '## Preferences and moves feedback lines into it)')
+    elif len(prefs) > PREF_MAX_ENTRIES:
+        f.add('WARN', 'MEMORY.md:%d' % (sec[0] + 1), '%d preferences (keep <= %d: merge, sharpen or '
+              'retire some — memory-health)' % (len(prefs), PREF_MAX_ENTRIES))
+    for e in entries:
+        where = 'MEMORY.md:%d' % (e.idx + 1)
+        if e.kind == 'other':
+            f.add('WARN', where, 'index line inside Preferences (%s is not a feedback memory) — move '
+                  'it under %s' % (e.target, MEMORIES_HEADING))
+            continue
+        if len(e.content) > PREF_LINE_WARN:
+            f.add('WARN', where, 'preference line has %d chars (> %d) — shorten the rule, put detail '
+                  'in the file' % (len(e.content), PREF_LINE_WARN))
+        if e.kind == 'bare':
+            f.add('INFO', where, 'preference without a feedback file (no feedback file; `pmem pref add` '
+                  'gives it one)')
+        elif e.kind == 'pref':
+            mf = MemFile(os.path.join(memdir, e.target), memdir)
+            n = violation_count(mf.body if mf.closed else mf.text)
+            if n >= 2:
+                f.add('INFO', e.target, 'lists %d violations — still broken after %d rewrites? ask '
+                      'the user how to phrase it (memory-health)' % (n, n))
+            if e.hook and mf.closed and mf.description and \
+                    norm_rule(mf.description) != norm_rule(e.hook):
+                f.add('INFO', e.target, 'description out of sync with the rule at %s — make the '
+                      'description the same rule (memory-health)' % where)
+    outside, extra = feedback_refs(memdir, lines, cache)
+    for ln, t, canonical in outside:
+        if canonical:
+            f.add('WARN', t, 'feedback memory indexed outside ## Preferences (MEMORY.md:%d) — `pmem '
+                  'index --fix`%s' % (ln, '' if sec else ' after `pmem init` adds the section'))
+        else:
+            f.add('WARN', t, 'feedback memory %s has no canonical index line (only MEMORY.md:%d '
+                  'refers to it) — add `- [title](%s) — rule` under ## Preferences' % (t[:-3], ln, t))
+    for ln, t in extra:
+        f.add('INFO', 'MEMORY.md:%d' % ln, 'other reference to %s left in place (pmem only moves '
+              'and edits its `- [title](%s) — rule` line)' % (t, t))
+
+
 def lint_memory(ctx, stale_days=90, check_paths=False):
     memdir = ctx.memdir
     f = Findings()
@@ -3246,10 +5284,25 @@ def lint_memory(ctx, stale_days=90, check_paths=False):
         elif a['handoff'] == 'not-first':
             f.add('WARN', 'MEMORY.md:%d' % a['handoff_line'], 'HANDOFF line is not the first link '
                   'line — `pmem index --fix`')
+        n = unclosed_comment([c for c, _ in lines])
+        if n:
+            f.add('ERROR', 'MEMORY.md', 'unclosed HTML comment at MEMORY.md:%d — it hides the rest of '
+                  'the index from agents and from pmem; close it with -->' % n)
+        n = unclosed_fence([c for c, _ in lines])
+        if n:
+            f.add('ERROR', 'MEMORY.md', 'unclosed code fence at MEMORY.md:%d — it turns the rest of '
+                  'the index into code; close it with ``` (pmem refuses to edit the index until '
+                  'then)' % n)
+        sec = pref_section(lines)
+        cache = {}
+        entries = classify(memdir, section_entries(lines, sec), cache) if sec else []
+        prefs = [e for e in entries if e.is_pref]
+        pref_lines = set(e.idx for e in prefs)
         for i, _t in link_lines(lines):  # only memory link lines are ever checked
             c = lines[i][0]
-            if len(c) > INDEX_LINE_CHARS:
+            if i not in pref_lines and len(c) > INDEX_LINE_CHARS:
                 f.add('WARN', 'MEMORY.md:%d' % (i + 1), 'index line has %d chars (> 150)' % len(c))
+        lint_preferences(f, memdir, lines, sec, entries, cache)
         for n, label in secret_hits(text):
             f.add('WARN', 'MEMORY.md:%d' % n, 'possible secret (%s)' % label)
     mode = git_mode(ctx)
@@ -3300,6 +5353,9 @@ def lint_memory(ctx, stale_days=90, check_paths=False):
                       % mf.type)
             if mf.name and mf.name != mf.stem:
                 f.add('WARN', where, 'name %r differs from the file stem' % mf.name)
+            if unquoted_colon(mf.fm, 'description'):
+                f.add('WARN', where, 'frontmatter: the description contains ": " but is not quoted — '
+                      'quote it (description: "…"), YAML parsers reject it')
             if mf.type == 'user' and mode == 'tracked':
                 f.add('WARN', where, 'type user memory in tracked mode (personal facts get committed)')
         if mf.name:
@@ -3466,6 +5522,14 @@ def notes_memory(name, description, body):
     return render_memory(name, description, 'project', now_utc_iso(), body.replace('\r\n', '\n'))
 
 
+def split_import_lines(idx_lines, new_lines):
+    """[(line, is_feedback)] -> (lines for the Preferences section, other lines); without a
+    section every line is an other line (only init / pref add / add feedback add it)."""
+    if not pref_section(idx_lines):
+        return [], [l for l, _ in new_lines]
+    return [l for l, f in new_lines if f], [l for l, f in new_lines if not f]
+
+
 def cmd_import(args):
     ctx = resolve(args.C)
     memdir = require_memory(ctx)
@@ -3614,13 +5678,24 @@ def cmd_import(args):
                 if t in imported_now and nfc(imported_now[t]) not in linked:
                     lead = len(c) - len(c.lstrip())
                     stripped = c.strip()
-                    new_lines.append(replace_link_target(
-                        stripped, imported_now[t], mc[lead:lead + len(stripped)]))
+                    line = replace_link_target(stripped, imported_now[t],
+                                               mc[lead:lead + len(stripped)])
+                    fb = MemFile(os.path.join(src, t)).type == 'feedback'
+                    if fb and not canonical_target(mask_lines([line])[0]):
+                        # prose about a preference: the section gets a real entry, the prose
+                        # line is kept with the other imported lines
+                        new_lines.append((pref_index_line(os.path.join(src, t), imported_now[t]),
+                                          True))
+                        new_lines.append((line, False))
+                    else:
+                        new_lines.append((line, fb))
                     linked.add(nfc(imported_now[t]))
             for fn, target in imported_now.items():
                 if fn not in src_linked and nfc(target) not in linked:
                     if indexable(target):
-                        new_lines.append(generated_index_line(os.path.join(src, fn), target))
+                        fb = MemFile(os.path.join(src, fn)).type == 'feedback'
+                        new_lines.append(((pref_index_line if fb else generated_index_line)(
+                            os.path.join(src, fn), target), fb))
                     else:
                         report.append('cannot index %s — rename it' % target)
                     linked.add(nfc(target))
@@ -3647,7 +5722,7 @@ def cmd_import(args):
                     entry['__inline__'] = collections.OrderedDict([('sha256', digest),
                                                                    ('target', target)])
                     # the index hook omits the (long) source path so the line stays < 150 chars
-                    new_lines.append(index_line(target[:-3], target, NOTES_HOOK))
+                    new_lines.append((index_line(target[:-3], target, NOTES_HOOK), False))
                     linked.add(nfc(target))
                     counts['notes'] += 1
                     report.append('notes: inline index notes of %s → %s' % (src_index, target))
@@ -3673,8 +5748,8 @@ def cmd_import(args):
                            notes_memory(target[:-3], desc, dec(data).lstrip('\ufeff'))))
             entry[os.path.basename(freal)] = collections.OrderedDict([('sha256', digest),
                                                                       ('target', target)])
-            new_lines.append(index_line(target[:-3], target, 'Notes imported from %s — review and '
-                                        'split into memories' % os.path.basename(freal)[:40]))
+            new_lines.append((index_line(target[:-3], target, 'Notes imported from %s — review and '
+                                         'split into memories' % os.path.basename(freal)[:40]), False))
             linked.add(nfc(target))
             counts['notes'] += 1
             report.append('notes: %s → %s' % (fp, target))
@@ -3700,17 +5775,28 @@ def cmd_import(args):
                 if text is None:
                     text, bom, idx_lines = '', False, to_lines(MEMORY_TEMPLATE)
                 eol = eol_of(idx_lines)
-                if idx_lines and idx_lines[-1][0].strip():
-                    append_line(idx_lines, '', eol)
-                append_line(idx_lines, '## Imported %s' % today(), eol)
-                for l in new_lines:
-                    append_line(idx_lines, l, eol)
+                prefs, others = split_import_lines(idx_lines, new_lines)
+                if prefs:      # feedback memories go to the end of the Preferences section
+                    section_insert(idx_lines, eol, pref_section(idx_lines),
+                                   [[l, eol] for l in prefs])
+                if others:
+                    if idx_lines and idx_lines[-1][0].strip():
+                        append_line(idx_lines, '', eol)
+                    append_line(idx_lines, '## Imported %s' % today(), eol)
+                    for l in others:
+                        append_line(idx_lines, l, eol)
                 atomic_write(os.path.join(memdir, 'MEMORY.md'),
                              enc(('\ufeff' if bom else '') + from_lines(idx_lines)), memdir=memdir)
         elif new_lines:
-            print('would append to MEMORY.md under "## Imported %s":' % today())
-            for l in new_lines:
-                print('  ' + l)
+            prefs, others = split_import_lines(idx_lines or to_lines(MEMORY_TEMPLATE), new_lines)
+            if prefs:
+                print('would add to MEMORY.md under "## Preferences":')
+                for l in prefs:
+                    print('  ' + l)
+            if others:
+                print('would append to MEMORY.md under "## Imported %s":' % today())
+                for l in others:
+                    print('  ' + l)
     print('%ssummary: %s' % ('(dry run, nothing written) ' if dry else '',
                              ', '.join('%s %d' % kv for kv in counts.items())))
     if counts['needs-merge'] or counts['notes']:
@@ -3751,17 +5837,14 @@ def backup_file(path, data):
 
 def wire_text(raw, remove):
     """Pure wire state machine. -> new bytes (or raises PmemError with marker line numbers)."""
-    bom = raw.startswith(b'\xef\xbb\xbf')
-    text = dec(raw[3:] if bom else raw)
-    lines = to_lines(text)
+    bom, lines = text_lines(raw)
     eol = eol_of(lines)
-    begins = [i for i, (c, _) in enumerate(lines) if c.rstrip() == WIRE_BEGIN]
-    ends = [i for i, (c, _) in enumerate(lines) if c.rstrip() == WIRE_END]
-    if (begins or ends) and not (len(begins) == 1 and len(ends) == 1 and begins[0] < ends[0]):
-        raise PmemError('unbalanced project-memory markers (BEGIN at line(s) %s; END at line(s) %s); '
-                        'fix the file by hand — nothing written'
-                        % (', '.join(str(i + 1) for i in begins) or 'none',
-                           ', '.join(str(i + 1) for i in ends) or 'none'), 1)
+    problem = block_problem(lines)   # the preferences block is checked too, never rewritten
+    if problem:
+        raise PmemError(problem + ('' if 'by hand' in problem else '; fix the file by hand')
+                        + ' — nothing written', 1)
+    contents = [c for c, _ in lines]
+    begins, ends = marker_lines(contents, WIRE_BEGIN), marker_lines(contents, WIRE_END)
     block = [[l, eol] for l in WIRE_BLOCK.rstrip('\n').split('\n')]
     if remove:
         if not begins:
@@ -3769,7 +5852,10 @@ def wire_text(raw, remove):
         b, e = begins[0], ends[0]
         start = b - 1 if b > 0 and not lines[b - 1][0].strip() else b
         no_final = lines[e][1] == '' and e == len(lines) - 1
-        new = lines[:start] + lines[e + 1:]
+        stop = e + 1
+        if start == 0 and stop < len(lines) and not lines[stop][0].strip():
+            stop += 1       # block at the top (e.g. before the preferences block): no leading blank
+        new = lines[:start] + lines[stop:]
         if no_final and new:
             new[-1][1] = ''
     elif begins:
@@ -3798,6 +5884,12 @@ def wire_one(path, remove):
         new = wire_text(raw, remove)
     except PmemError as e:
         raise PmemError('%s: %s' % (path, e), e.code)
+    if remove and exists:
+        g = GlobalFile(path)
+        if g.sub:
+            n = len(g.entries())
+            print('kept the global preferences block (%d rules) in %s; remove rules with `pmem pref '
+                  'demote`' % (n, path))
     if new == raw and (exists or remove):
         print('ok %s' % path)
         return 0
@@ -3809,7 +5901,9 @@ def wire_one(path, remove):
     if remove:
         print('removed block from %s' % path)
     else:
-        print('%s %s' % ('updated' if WIRE_BEGIN.encode() in raw else 'inserted block into', path))
+        _, old_lines = text_lines(raw)
+        had = marker_lines([c for c, _ in old_lines], WIRE_BEGIN)
+        print('%s %s' % ('updated' if had else 'inserted block into', path))
     return 0
 
 
@@ -4015,11 +6109,23 @@ def cmd_restore(args):
         print('restored %s from %s' % (rel, rev))
     if indexed:
         def edit(lines, eol):
-            if any(nfc(t) == nfc(rel) for _, t in link_lines(lines)):
+            masked = mask_lines([c for c, _ in lines])
+            sec = pref_section(lines, masked)
+            mine = [e for e in section_entries(lines, sec, masked)
+                    if e.target and nfc(e.target) == nfc(rel)] if sec else []
+            if mine:
+                return 'kept'
+            if any(nfc(t) == nfc(rel) for _, t in canonical_lines(lines, masked)):
                 return False
-            append_line(lines, generated_index_line(path), eol)
+            if sec and memory_type(memdir, rel) == 'feedback':
+                section_insert(lines, eol, sec, [[pref_index_line(path), eol]])
+            else:
+                append_ordinary(lines, eol, generated_index_line(path))
             return True
-        if update_index(memdir, edit):
+        res = update_index(memdir, edit)
+        if res == 'kept':
+            print('kept preference line for %s' % rel)
+        elif res:
             print('re-added the index line for %s' % rel)
     snapshot(memdir, 'restore %s from %s' % (rel, rev))
     return 0
@@ -4302,7 +6408,7 @@ def hook_session_start(args):
     if os.path.isdir(os.path.join(ctx.memdir, '.git')):
         spawn_snapshot(ctx.memdir, ' '.join(x for x in ('session-start', source, sid) if x))
     text = assemble_context(ctx, ctx.key, with_index=args.with_index, cap=HOOK_CONTEXT_CAP,
-                            native_check=True)
+                            native_check=True, with_prefs=True)
     payload = {'hookSpecificOutput': {'hookEventName': 'SessionStart',
                                       'additionalContext': clean_text(text)}}
     sys.stdout.write(json.dumps(payload) + '\n')   # ASCII-only: valid under any stdout encoding
@@ -4381,6 +6487,280 @@ def hook_checkpoint(args):
     atomic_write(path, enc(clean_text('\n'.join(lines) + '\n')), memdir=memdir)
 
 
+PROMPT_SKIP_SOURCES = ('system', 'loop_wakeup', 'schedule_wakeup', 'poll_event')
+# Signals of `pmem hook prompt`, matched on prompt_text() (NFKC: `，？！：；` arrive as `,?!:;`).
+SIGNAL_STRONG_RE = re.compile(
+    r'今后|今後|下次|一律|永远不要|永遠不要|永远别|永遠別|别再|別再|不要再|再也别|再也別|记住|記住'
+    r'|我(?:更|不)?(?:喜欢|喜歡|习惯|習慣|偏好)|我更?希望你'
+    r"|from now on|going forward|next time|\bi(?:'d| would)? prefer\b"
+    r"|\bi (?:don'?t )?like (?:it )?when you|never again|don'?t ever|remember (?:that|to)"
+    r'|\bi (?:already )?said\b'
+    r'|\bstop (?:using|adding|ending|writing|putting|making|doing)\b'
+    r'|\bnever (?:use|add|write|put|end)\b', re.I)
+# violation markers that count on their own (each is a strong signal too)
+SIGNAL_VIOLATION_RE = re.compile(r"又(?:这样|這樣|忘|来|來|写|寫|用)|\bagain\s*!|\btold you\b|\bas i said\b",
+                                 re.I)
+# 说过/讲过 = "I told you" only as 我…说过 / 跟你说过 and with 你 in the message (你说过 = "you said")
+SIGNAL_SAID_RE = re.compile(r'(?:我(?:已经|已經|早就|之前|刚才|剛才|都|明明|不是)?(?:(?:跟|和|对|對|给|給)你)?'
+                            r'|(?:跟|和|对|對|给|給)你)(?:说|說|讲|講)(?:过|過)')
+SIGNAL_AGAIN_RE = re.compile(r'\bagain\b', re.I)       # with you/your in its clause, not a request
+SIGNAL_REQUEST_RE = re.compile(r"^\s*(?:(?:can|could|would|will) you|try|let'?s)\b|\bplease\b", re.I)
+# 以后/以後 = "from now on" only at the start of a clause or right before one of these words, and
+# never after 完/了/好/之 (改完以后 = "after changing")
+SIGNAL_YIHOU_RE = re.compile(r'(?<![完了好之])(?:以后|以後)')
+SIGNAL_YIHOU_NEXT = ('都', '不要', '别', '別', '請', '请', '回答', '回复', '回覆', '写', '寫', '用',
+                     '一律', '统一', '統一', '所有', '每次')
+SIGNAL_TONGYI_RE = re.compile(r'(?:统一|統一)(?:用|成)')      # not after 把 in its clause (a task)
+SIGNAL_DEFAULT_RE = re.compile(r'默认(?:都|用)|默認(?:都|用)|\bby default\b', re.I)  # not in a question
+SIGNAL_EVERY_RE = re.compile(r'每次|\bevery time\b', re.I)  # not in a question; needs an agent reference
+SIGNAL_STYLE_RE = re.compile(
+    r'太长|太長|啰嗦|囉嗦|囉唆|写太多|寫太多|太多了|简洁一?点|簡潔一?點|简短一?点|簡短一?點|凝练|凝練'
+    r'|too (?:long|verbose|wordy)|more concise|shorter (?:answers|replies)', re.I)
+SIGNAL_WEAK_RE = re.compile(r"\bstop\b|\binstead\b|\balways\b|\bnever\b|\bdon'?t\b|不对|不對|错了|錯了"
+                            r'|别用|別用|不要用|请简洁|請簡潔|簡潔', re.I)   # not in a question
+SIGNAL_AGENT_RE = re.compile(r'\byou\b|\byour\b|你|回复|回覆|回答', re.I)
+SIGNAL_YOU_RE = re.compile(r'\byou\b|\byour\b|你', re.I)
+SIGNAL_QUESTION_RE = re.compile(
+    r'\?|吗|嗎|哪|什么|什麼|是不是|为什么|為什麼|\b(?:what|which|why)\b'
+    r'|^\s*(?:can|could|would|will|do|does|did|is|are)\s+(?:you|it|i|we|this|that|there)\b', re.I)
+SENTENCE_SPLIT_RE = re.compile(r'(?<=[!?。])|(?<=\.)(?=\s)|\n')
+CLAUSE_SPLIT_RE = re.compile(r'[,;:!?。、\n]|\.(?=\s|$)')
+CLAUSE_START = ',;:.!?。、 \t\n'
+PASTED_RE = re.compile(r'<pasted_content\b[^>]*>.*?(?:</pasted_content\s*>|\Z)', re.I | re.S)
+NUDGE = ('project-memory: this message may state how the user wants you to work beyond this task. If '
+         'it does, save it now by editing {index}: add `- [<title>](<name>.md) — <rule>` under '
+         '## Preferences and write <name>.md as a feedback memory (Why / How to apply); then end '
+         'your reply with `✓ preference: <rule>`. Task-specific instructions are not preferences: '
+         'just follow them. Otherwise ignore this note.')
+# After a violation marker the violation part leads, followed by a shorter capture note. Without
+# {rules} each variant stays within PROMPT_NUDGE_CHARS (the path is shortened to fit); the rules
+# have their own budget: up to NUDGE_RULES rules of at most NUDGE_RULE_CHARS each.
+NUDGE_VIOLATION = ('project-memory: the user says you broke an existing preference: {rules}. Sharpen '
+                   'that rule line, update its description, move it to the top of its ## Preferences '
+                   'and add `- {date}: <what happened>` under **Violations:** in its file (for a rule '
+                   'marked (from <dir>) edit that outer MEMORY.md).')
+NUDGE_ALSO = (' If the message also states a new lasting preference, save it too: `- [<title>](<name>.md)'
+              ' — <rule>` under ## Preferences in {index} plus <name>.md as a feedback memory (Why / '
+              'How to apply); then end your reply with `✓ preference: <rule>`.')
+NUDGE_NO_RULES = 'see ## Preferences in {index}'
+NUDGE_RULES, NUDGE_RULE_CHARS, NUDGE_LABEL_CHARS = 3, 160, 60
+RANK_STOPWORDS = frozenset((
+    'the and you your yours for not but with this that these those are was were have has had use '
+    'used uses using don didn doesn can will would should could again told said please from now '
+    'always never when what which there they them then than into just like also any all one out '
+    'get got its our about every time too very more most some such only each here how why who '
+    'did does done make made want wanted').split())
+RANK_CJK_STOP = frozenset(('不要', '不用', '我说', '说过', '过了', '過了', '你又', '又用', '用了', '以后',
+                           '一下', '这个', '那个', '我们', '你们', '的话', '我跟', '跟你', '了不'))
+# Topics that preference rules and complaints share across English and Chinese, so that
+# "我说过不要用表格" ranks "Never use Markdown tables" first: each English word (after rank_tokens'
+# plural cut) or CJK term adds the topic's token '#<topic>'.
+RANK_TOPICS = {
+    'table': ('table', '表格'),
+    'chinese': ('chinese', '中文', '汉语', '漢語'),
+    'english': ('english', '英文', '英语', '英語'),
+    'recap': ('recap', 'summary', 'summarize', 'summarise', '总结', '總結', '小结', '小結', '摘要'),
+    'length': ('long', 'short', 'shorter', 'concise', 'brief', 'verbose', 'wordy', 'length',
+               'sentence', '太长', '太長', '简洁', '簡潔', '简短', '簡短', '啰嗦', '囉嗦', '凝练',
+               '凝練', '篇幅', '字数', '字數'),
+    'comment': ('comment', '注释', '註釋'),
+    'commit': ('commit', '提交'),
+    'test': ('test', '测试', '測試'),
+    'emoji': ('emoji', '表情'),
+    'list': ('list', 'bullet', '列表', '要点', '要點'),
+    'heading': ('heading', 'header', '标题', '標題'),
+    'docstring': ('docstring', '文档字符串', '文檔字符串'),
+}
+RANK_TOPIC_WORDS = {w: t for t, ws in RANK_TOPICS.items() for w in ws if w.isascii()}
+RANK_TOPIC_CJK = tuple((w, t) for t, ws in RANK_TOPICS.items() for w in ws if not w.isascii())
+
+
+def prompt_text(prompt):
+    """The prompt without pasted content and fenced code blocks (a fence that never closes runs
+    to the end, as in CommonMark), NFKC-normalized, curly apostrophes mapped to '."""
+    text = PASTED_RE.sub(' ', prompt)
+    contents = text.split('\n')
+    flags = fence_flags(contents, eof_closes=True)
+    text = '\n'.join(c for c, f in zip(contents, flags) if not f).strip()
+    text = unicodedata.normalize('NFKC', text)
+    for ch in '’‘＇ʼ':
+        text = text.replace(ch, "'")
+    return text
+
+
+def _parts(regex, text):
+    return [p for p in regex.split(text) if p and p.strip()]
+
+
+def _yihou(text):
+    """以后/以後 used as "from now on" (see SIGNAL_YIHOU_RE)."""
+    for m in SIGNAL_YIHOU_RE.finditer(text):
+        i, j = m.start(), m.end()
+        if i == 0 or text[i - 1] in CLAUSE_START or text.startswith(SIGNAL_YIHOU_NEXT, j):
+            return True
+    return False
+
+
+def _tongyi(clause):
+    m = SIGNAL_TONGYI_RE.search(clause)
+    return bool(m) and '把' not in clause[:m.start()]
+
+
+def prompt_signals(text):
+    """-> (matched, violation marker matched). ``text``: see prompt_text."""
+    sentences = _parts(SENTENCE_SPLIT_RE, text)
+    clauses = _parts(CLAUSE_SPLIT_RE, text)
+
+    def statement(part):
+        return not SIGNAL_QUESTION_RE.search(part)
+    violation = bool(
+        SIGNAL_VIOLATION_RE.search(text)
+        or (SIGNAL_SAID_RE.search(text) and SIGNAL_YOU_RE.search(text))
+        or any(SIGNAL_AGAIN_RE.search(c) and SIGNAL_YOU_RE.search(c)
+               and not SIGNAL_REQUEST_RE.search(c) for c in clauses))
+    matched = (violation or bool(SIGNAL_STRONG_RE.search(text) or SIGNAL_STYLE_RE.search(text))
+               or _yihou(text) or any(_tongyi(c) for c in clauses)
+               or any(SIGNAL_DEFAULT_RE.search(s) and statement(s) for s in sentences)
+               or any(SIGNAL_EVERY_RE.search(s) and statement(s) and SIGNAL_AGENT_RE.search(s)
+                      for s in sentences)
+               or (bool(SIGNAL_AGENT_RE.search(text))
+                   and any(SIGNAL_WEAK_RE.search(s) and statement(s) for s in sentences)))
+    return matched, violation
+
+
+def prompt_rate_ok(memdir, sid):
+    """At most one nudge per session per PROMPT_INTERVAL; records this one. False also when the
+    state file cannot be written (then no nudge at all)."""
+    sid8 = re.sub(r'[^A-Za-z0-9_-]', '', sid)[:8] or 'none'
+    path = os.path.join(memdir, '.checkpoints', '.prompt-' + sid8)
+    try:
+        guard(memdir, path)
+        now = time.time()
+        try:
+            last = float(read_text(path).strip() or 0)
+        except FileNotFoundError:
+            last = 0.0
+        if 0 <= now - last < PROMPT_INTERVAL:
+            return False
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        atomic_write(path, enc('%d\n' % int(now)), memdir=memdir)
+    except (OSError, ValueError, PmemError):
+        return False
+    try:        # state of sessions that ended long ago
+        cdir = os.path.dirname(path)
+        for fn in os.listdir(cdir):
+            p = os.path.join(cdir, fn)
+            if fn.startswith('.prompt-') and p != path and now - os.lstat(p).st_mtime > 7 * 86400:
+                os.unlink(p)
+    except OSError:
+        pass
+    return True
+
+
+def short_path(path, room):
+    """``path`` in at most ``room`` chars: as is, else with $HOME collapsed to ~, else only its
+    last 3 (then 2, 1) components after "…/", else cut from the left."""
+    if len(path) <= room:
+        return path
+    p = display_path(path)
+    if len(p) <= room:
+        return p
+    parts = [x for x in p.split('/') if x]
+    for k in (3, 2, 1):
+        q = '…/' + '/'.join(parts[-k:])
+        if len(q) <= room:
+            return q
+    return '…' + p[-(room - 1):] if room > 1 else '…'
+
+
+def rank_tokens(text):
+    """Words for ranking rules against a prompt: ASCII words of >= 3 characters (no stop words,
+    a plural s dropped), CJK bigrams and the RANK_TOPICS both languages share."""
+    s = unicodedata.normalize('NFKC', text or '').casefold()
+    out = set()
+    for w in re.findall(r'[a-z0-9]+', s):
+        if len(w) < 3 or w in RANK_STOPWORDS:
+            continue
+        if len(w) >= 4 and w.endswith('s') and not w.endswith('ss'):
+            w = w[:-1]
+        out.add(w)
+        if w in RANK_TOPIC_WORDS:
+            out.add('#' + RANK_TOPIC_WORDS[w])
+    out.update('#' + t for w, t in RANK_TOPIC_CJK if w in s)
+    run = ''
+    for ch in s + ' ':
+        if is_cjk(ch):
+            run += ch
+            continue
+        out.update(run[k:k + 2] for k in range(len(run) - 1) if run[k:k + 2] not in RANK_CJK_STOP)
+        run = ''
+    return out
+
+
+def broken_rules(ctx, prompt):
+    """Up to NUDGE_RULES rules the user may mean, best first: the project's preferences and the
+    inherited ones, ranked by words shared with the prompt (ties: section order, project first).
+    -> [(rule, outer memdir or None)]"""
+    cands = [(e.rule, None) for e in read_prefs(ctx.memdir)]
+    try:
+        cands += [(e.rule, m) for m, entries in inherited_prefs(ctx)[0] for e in entries]
+    except Exception:
+        pass
+    words = rank_tokens(prompt)
+    ranked = sorted(enumerate(cands), key=lambda x: (-len(words & rank_tokens(x[1][0])), x[0]))
+    return [c for _, c in ranked[:NUDGE_RULES]]
+
+
+def nudge_text(ctx, violation, prompt=''):
+    """The note for a matching prompt. After a violation marker it leads with the rules the user
+    may mean (their own budget) and what to do with them. Without the rules it never exceeds
+    PROMPT_NUDGE_CHARS: the memory path is shortened to fit."""
+    tmpl = (NUDGE_VIOLATION.replace('{date}', today()) + NUDGE_ALSO) if violation else NUDGE
+    room = PROMPT_NUDGE_CHARS - len(tmpl.replace('{index}', '').replace('{rules}', ''))
+    index = short_path(ctx.memdir, room - len('/MEMORY.md')) + '/MEMORY.md'
+    text = tmpl.replace('{index}', index)
+    if violation:
+        shown = ['"%s"%s' % (cut(rule, NUDGE_RULE_CHARS),
+                             ' (from %s)' % short_path(m, NUDGE_LABEL_CHARS) if m else '')
+                 for rule, m in broken_rules(ctx, prompt)]
+        text = text.replace('{rules}', '; '.join(shown) or NUDGE_NO_RULES.replace('{index}', index))
+    return text
+
+
+def hook_prompt(args):
+    """UserPromptSubmit: nudge the agent to save a lasting preference. Cheap checks first; the
+    memory (git) is looked up only for a matching prompt; one write of ASCII JSON at the end."""
+    if hasattr(signal, 'SIGALRM'):
+        signal.signal(signal.SIGALRM, lambda *_: os._exit(0))
+        signal.alarm(2)
+    data = read_hook_input(wait=1.0)
+    source = data.get('source')
+    if isinstance(source, str) and source.strip().lower() in PROMPT_SKIP_SOURCES:
+        return
+    prompt = data.get('prompt')
+    if not isinstance(prompt, str) or not prompt.strip():
+        return
+    text = prompt_text(prompt)
+    if not text or len(text) > PROMPT_MAX_CHARS:
+        return
+    matched, violation = prompt_signals(text)
+    if not matched:
+        return
+    ctx = hook_context(data, args.C)
+    if ctx is None or not ctx.memdir or not os.access(ctx.memdir, os.R_OK | os.W_OK | os.X_OK):
+        return
+    if not prompt_rate_ok(ctx.memdir, str(data.get('session_id') or '')):
+        return
+    payload = {'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit',
+                                      'additionalContext': clean_text(nudge_text(ctx, violation,
+                                                                                 text))}}
+    out = json.dumps(payload) + '\n'       # ASCII-only
+    sys.stdout.write(out)
+    sys.stdout.flush()
+    if hasattr(signal, 'SIGALRM'):
+        signal.alarm(0)
+
+
 def cmd_hook(args):
     global QUIET, GIT_TIMEOUT
     QUIET = True
@@ -4393,6 +6773,8 @@ def cmd_hook(args):
             hook_checkpoint(args)
         elif args.hook == 'snapshot':
             hook_snapshot(args)
+        elif args.hook == 'prompt':
+            hook_prompt(args)
     except BaseException:  # hooks must never fail the agent
         pass
     return 0
@@ -4452,7 +6834,8 @@ def build_parser():
     sp = cmd('status', 'show memory, wiring and git state', cmd_status)
     sp.add_argument('--json', action='store_true', help='machine-readable output')
 
-    sp = cmd('context', 'print handoff, newer checkpoint, other handoffs and MEMORY.md', cmd_context)
+    sp = cmd('context', 'print handoff, newer checkpoint, other handoffs, inherited preferences and '
+                        'MEMORY.md', cmd_context)
     sp.add_argument('--key', metavar='K',
                     help='workstream key (default: $PMEM_KEY, else from the worktree)')
 
@@ -4514,6 +6897,66 @@ def build_parser():
                     help='Claude config dir for `wire claude` (repeatable)')
     sp.add_argument('--remove', action='store_true', help='remove the block')
 
+    sp = cmd('pref', 'preferences: list, add, remove, violated, promote, demote', cmd_pref)
+    sp.set_defaults(pref_parser=sp)
+    ps = sp.add_subparsers(dest='pref_cmd', metavar='ACTION')
+
+    def pcmd(name, help_):
+        q = ps.add_parser(name, help=help_, description=help_, formatter_class=Formatter)
+        q.add_argument('-C', metavar='DIR', default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        return q
+
+    q = pcmd('list', 'preferences of this project, of outer folders and of the global block')
+    q.add_argument('--all', action='store_true',
+                   help='also every registered project (to spot rules repeated across projects)')
+    q.add_argument('--json', action='store_true', help='machine-readable output')
+    q = pcmd('add', 'record a preference: an entry under ## Preferences plus a feedback memory')
+    q.add_argument('rule', metavar='RULE', help='one imperative line (<= %d chars)' % PREF_RULE_MAX)
+    q.add_argument('--name', metavar='NAME', help='file stem (default: from the first words of RULE)')
+    q.add_argument('--title', metavar='T', help='link text (default: NAME with spaces)')
+    q.add_argument('--why', metavar='TEXT', help='**Why:** line of a new file')
+    q.add_argument('--how', metavar='TEXT', help='**How to apply:** line of a new file')
+    q.add_argument('--up', action='store_true', help='record it in the nearest outer memory '
+                                                      '(the workspace)')
+    q.add_argument('--force', action='store_true',
+                   help='replace an entry with the same rule recorded under another name; rewrite '
+                        'an existing NAME.md')
+    q = pcmd('remove', 'take a preference out of the section (its file stays as a memory)')
+    q.add_argument('what', metavar='NAME|RULE')
+    q = pcmd('violated', 'a preference was broken: sharpen its rule, log the date, move it to the top')
+    q.add_argument('name', metavar='NAME')
+    q.add_argument('--rule', required=True, metavar='R', help='the sharper rule (must differ)')
+    q.add_argument('--note', metavar='TEXT', help='what happened (dated line under **Violations:**)')
+    q.add_argument('--up', action='store_true',
+                   help='the rule is inherited: edit it in the nearest outer memory (general form: '
+                        '`pmem -C <outer dir> pref violated …`)')
+    q = pcmd('promote', 'copy a preference to the global block of every global instruction file '
+                        '(only with the user\'s consent)')
+    q.add_argument('what', metavar='NAME|RULE')
+    q.add_argument('--config-dir', action='append', default=[], metavar='DIR',
+                   help='also <DIR>/CLAUDE.md (repeatable)')
+    q.add_argument('--target', dest='targets', action='append', default=[], metavar='FILE',
+                   help='also this instruction file (repeatable)')
+    q.add_argument('--keep-local', action='store_true', help="keep the project's own entry")
+    q.add_argument('--only', action='store_true',
+                   help='write only the --target / --config-dir files (not the default Codex and '
+                        'Claude files)')
+    q.add_argument('--dry-run', action='store_true',
+                   help='print every file it would write and the change; write nothing')
+    q = pcmd('demote', 'remove a preference from the global blocks')
+    q.add_argument('rule', metavar='RULE', help='the rule (or a unique part of it)')
+    q.add_argument('--config-dir', action='append', default=[], metavar='DIR',
+                   help='also <DIR>/CLAUDE.md (repeatable)')
+    q.add_argument('--target', dest='targets', action='append', default=[], metavar='FILE',
+                   help='also this instruction file (repeatable)')
+    q.add_argument('--to-project', action='store_true',
+                   help='first record it as a preference of this project')
+    q.add_argument('--only', action='store_true',
+                   help='read and write only the --target / --config-dir files (not the default '
+                        'Codex and Claude files)')
+    q.add_argument('--dry-run', action='store_true',
+                   help='print every file it would write and the change; write nothing')
+
     sp = cmd('snapshot', 'commit all changes to the private history', cmd_snapshot)
     sp.add_argument('-m', dest='message', metavar='MSG', help='commit message')
 
@@ -4556,6 +6999,9 @@ def build_parser():
     h = hs.add_parser('checkpoint', help='Stop/StopFailure/PreCompact: write .checkpoints/<key>.md',
                       description='Stop/StopFailure/PreCompact: write .checkpoints/<key>.md')
     h.add_argument('-C', metavar='DIR', default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    h = hs.add_parser('prompt', help='UserPromptSubmit: nudge to save a lasting preference',
+                      description='UserPromptSubmit: nudge to save a lasting preference')
+    h.add_argument('-C', metavar='DIR', default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     h = hs.add_parser('snapshot', help='internal: background snapshot started by session-start',
                       description='internal: private-history snapshot that session-start runs '
                                   'in a detached background process')
@@ -4574,10 +7020,30 @@ def setup_stdio():
             pass
 
 
+HOOK_SUBCOMMANDS = ('session-start', 'checkpoint', 'snapshot', 'prompt')
+
+
+def positionals(argv):
+    """Leading positional words of argv (skipping -C DIR and other options)."""
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+        elif a == '-C':
+            skip = True
+        elif not a.startswith('-'):
+            out.append(a)
+    return out
+
+
 def main(argv=None):
     setup_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
+    pos = positionals(argv)
+    if pos[:1] == ['hook'] and len(pos) > 1 and pos[1] not in HOOK_SUBCOMMANDS \
+            and not set(argv) & set(('-h', '--help')):
+        return 0        # a hook this version does not know (newer settings): stay silent
     if 'hook' in argv:  # hooks tolerate unknown extra arguments
         args, unknown = parser.parse_known_args(argv)
         if unknown and getattr(args, 'cmd', None) != 'hook':

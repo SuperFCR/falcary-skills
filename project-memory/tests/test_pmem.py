@@ -43,6 +43,15 @@ MEMORY_TEMPLATE = (
     '\n'
     '- [HANDOFF — current state](HANDOFF.md) — read before any task at session start;'
     ' update at milestones\n'
+    '\n'
+    '## Preferences\n'
+    '> How the user wants you to work: follow every line, every session; on conflict this project'
+    ' beats outer folders and the global list. Save a new one at once by editing this file:'
+    ' `- [<title>](<name>.md) — <rule>` here (not under Memories) plus `<name>.md` as a `feedback`'
+    ' memory with **Why:** and **How to apply:**; then end your reply with'
+    ' `✓ preference: <rule>`.\n'
+    '\n'
+    '## Memories\n'
 )
 HANDOFF_LINE = ('- [HANDOFF — current state](HANDOFF.md) — read before any task at session start;'
                 ' update at milestones')
@@ -85,18 +94,25 @@ WIRE_BLOCK = '\n'.join([
     ' from the main checkout). It takes precedence over any other memory location, including'
     ' your built-in memory store and older per-repo notes files such as CLAUDE.local.md.',
     '- At session start and after compaction, run `pmem context` if available (handoff, any newer'
-    ' auto checkpoint, index); otherwise read `HANDOFF.md` (or your worktree\'s'
-    ' `handoffs/<name>.md`) and a newer `.checkpoints/<key>.md` — no agent loads these natively'
-    ' — then `MEMORY.md` if it is not already in your context. Open single memories only when'
-    ' relevant and verify them against the current code before acting.',
+    ' auto checkpoint, inherited preferences, index); otherwise read `HANDOFF.md` (or your'
+    ' worktree\'s `handoffs/<name>.md`) and a newer `.checkpoints/<key>.md` — no agent loads these'
+    ' natively — then `MEMORY.md` if it is not already in your context. Open single memories only'
+    ' when relevant and verify them against the current code before acting.',
+    '- Follow every line under `## Preferences` in that `MEMORY.md`, in the `MEMORY.md` of any'
+    ' `.agent-memory/` further up, and in this file\'s preferences block; on conflict the nearest'
+    ' wins. When the user states a lasting preference or corrects how you work, save it at once by'
+    ' editing the files: `- [<title>](<name>.md) — <rule>` under `## Preferences` plus `<name>.md`'
+    ' as a `feedback` memory with Why and How to apply (`pmem pref add` does the same; `--up` for'
+    ' the whole workspace), then end your reply with `✓ preference: <rule>`. If you broke an'
+    ' existing one, sharpen its line and move it to the top. Task-specific instructions are not'
+    ' preferences.',
     '- Before debugging an error, search the memory for its key tokens (`pmem find ...` or grep)'
     ' and try a recorded fix first.',
-    '- Save right away when the user corrects you or confirms an unusual approach, when a failure'
-    ' took 3+ attempts (symptom, root cause, fix), or when you repeat a multi-step procedure: one'
-    ' fact per file with `name`/`description`/`metadata.type`/`metadata.modified` (UTC)'
-    ' frontmatter plus one line in `MEMORY.md`. Never save secrets; preferences that hold for'
-    ' every project belong in your global instruction file (e.g. ~/.codex/AGENTS.md or'
-    ' ~/.claude/CLAUDE.md) instead.',
+    '- Save right away when the user confirms an unusual approach, when a failure took 3+ attempts'
+    ' (symptom, root cause, fix), or when you repeat a multi-step procedure: one fact per file with'
+    ' `name`/`description`/`metadata.type`/`metadata.modified` (UTC) frontmatter plus one line in'
+    ' `MEMORY.md`. Never save secrets; a preference that holds for every project goes to the global'
+    ' preferences block only with the user\'s consent (`pmem pref promote`).',
     '- Keep the handoff current at milestones (step done, before long or remote jobs, before'
     ' stopping), setting `metadata.modified` and `by`, so another agent can resume if this'
     ' session ends abruptly. Never delete memory files; retire them with `pmem archive`.',
@@ -288,7 +304,7 @@ class Helpers(PmemCase):
 class CliTests(Helpers):
     def test_version(self):
         result = self.pmem('--version')
-        self.assertIn('pmem 1.0.0', result.stdout)
+        self.assertIn('pmem 1.1.0', result.stdout)
 
     def test_every_subcommand_has_help(self):
         for command in SUBCOMMANDS:
@@ -696,7 +712,7 @@ class InitTests(Helpers):
             with self.subTest(child=child.name):
                 data = self.settings(child)
                 self.assertEqual(data['autoMemoryDirectory'], mem)
-                self.assertEqual(len(self.our_hook_commands(data)), 4)
+                self.assertEqual(len(self.our_hook_commands(data)), 5)
                 self.assertTrue(self.check_ignored(child, '.claude/settings.local.json'))
                 self.assertEqual(self.git_out(child, 'status', '--porcelain', '--untracked-files=all'), '')
                 self.assertIn(child.name, result.stdout)
@@ -744,7 +760,8 @@ class ClaudeSettingsTests(Helpers):
 
     def assert_ours_once(self, data):
         events = sorted(event for event, _group, _hook in self.our_hook_commands(data))
-        self.assertEqual(events, ['PreCompact', 'SessionStart', 'Stop', 'StopFailure'])
+        self.assertEqual(events, ['PreCompact', 'SessionStart', 'Stop', 'StopFailure',
+                                  'UserPromptSubmit'])
 
     def test_fresh_settings_and_runnable_hook_commands(self):
         root, mem = self.init_project(self.work / 'fresh', '--no-history')
@@ -762,8 +779,10 @@ class ClaudeSettingsTests(Helpers):
                 self.assertTrue(command.startswith("python3 '"), command)
                 self.assertIn('2>/dev/null || true', command)
                 self.assertTrue(command.rstrip().endswith(MARK), command)
-                wanted = 'hook session-start' if event == 'SessionStart' else 'hook checkpoint'
+                wanted = {'SessionStart': 'hook session-start',
+                          'UserPromptSubmit': 'hook prompt'}.get(event, 'hook checkpoint')
                 self.assertIn(wanted, command)
+                self.assertEqual(hook.get('timeout'), 5 if event == 'UserPromptSubmit' else 10)
                 if event == 'SessionStart':
                     self.assertEqual(group.get('matcher'), 'startup|resume|clear|compact')
                 commands[event] = command
@@ -1102,8 +1121,9 @@ class MemoryCommandTests(Helpers):
         write(self.mem / 'offset-time.md', mem_file('offset-time', 'Offset timestamp',
                                                     modified='2026-11-22T10:00:00+08:00'))
         write(self.mem / 'ancient.md', mem_file('ancient', 'Very old fact', modified='2001-01-01T00:00:00Z'))
-        self.append_index(self.mem, '- [native-style](native-style.md) — Native writes',
-                          '- [top-level](top-level.md) — Top-level type',
+        write(self.mem / 'MEMORY.md', self.index().replace(
+            '## Memories\n', '- [native-style](native-style.md) — Native writes\n\n## Memories\n'))
+        self.append_index(self.mem, '- [top-level](top-level.md) — Top-level type',
                           '- [offset-time](offset-time.md) — Offset timestamp',
                           '- [ancient](ancient.md) — Very old fact')
         self.pmem('lint', '--strict', cwd=self.root)

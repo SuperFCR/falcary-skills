@@ -5,7 +5,7 @@ description: 维护项目 .agent-memory/ 里的交接文件 HANDOFF.md 与 hando
 
 # memory-handoff：交接与接手
 
-交接文件记录**此刻的任务状态**，不是记忆：目的是让任何 agent 在本会话突然结束后也能接着干。持久的经验写进记忆，用 [memory-learn](../memory-learn/SKILL.md)。通用规则见 [project-memory](../project-memory/SKILL.md)。
+交接文件记录**此刻的任务状态**，不是记忆：目的是让任何 agent 在本会话突然结束后也能接着干。持久的经验写进记忆，用户对做事方式的长期要求写进 `MEMORY.md` 的 `## Preferences`，都用 [memory-learn](../memory-learn/SKILL.md)。通用规则见 [project-memory](../project-memory/SKILL.md)。
 
 **调用 CLI**：PATH 上有 `pmem` 就用它；否则用会话开始注入的 `CLI: python3 '…'` 那个路径，或 `python3 <skills_root>/project-memory/scripts/pmem.py`，`<skills_root>` 是本 skill 目录的上一级。下文统一写 `pmem`。
 
@@ -29,11 +29,11 @@ description: 维护项目 .agent-memory/ 里的交接文件 HANDOFF.md 与 hando
 | Done | 已完成的步骤，每步一行，带 commit 或文件 |
 | Next step | 下一个具体动作，接手者照着就能执行 |
 | Live state | 分支、worktree、运行中的任务与 PID、远程目录、URL；每项一行，后附核查命令，如 `git -C <path> status -sb`、`kill -0 <pid>`、调度器的查询命令 |
-| Decisions and constraints in force | 本任务内有效的决定和用户约束 |
+| Decisions and constraints in force | 只在本任务内有效的决定和用户约束。用户说“以后都这样”的长期要求不写这里：它是偏好，按 memory-learn 存进 `## Preferences`，否则下个任务就丢了 |
 | Open questions | 等用户回答的问题 |
 
 4. frontmatter 的 `metadata` 下：`modified` 设为 `date -u +%Y-%m-%dT%H:%M:%SZ`，`by` 设为当前 agent 的标识，如 `claude-code`、`codex`，多账号时加区分标签；`name` 与 `workstream` 不动。漏改 `modified` 时 pmem 拿文件修改时间兜底，但复制或恢复文件会重置它，所以照样要改。
-5. 控制在 4 KB 以内：Done 压成每步一行，删掉已解决的问题；值得长期保留的经验移进记忆。
+5. 控制在 4 KB 以内：Done 压成每步一行，删掉已解决的问题；值得长期保留的经验移进记忆，长期偏好移进 `## Preferences`。
 6. 任务结束时把 Goal 改成 `(no active task)`，Done 留一行总结。交接文件从不删除。
 
 ## 接手

@@ -17,8 +17,8 @@
     {
       "name": "project-memory",
       "source": "./project-memory",
-      "description": "项目记忆放进项目本身：Claude Code、Codex 与不同账号共用 .agent-memory/，随时交接、换 agent、续上额度用尽中断的会话；含记忆、学习、反思、交接、体检五个 skill",
-      "version": "1.0.0"
+      "description": "项目记忆放进项目本身：Claude Code、Codex 与不同账号共用 .agent-memory/，随时交接、换 agent、续上额度用尽中断的会话；说过一次的偏好之后每个会话都照做；含记忆、学习、反思、交接、体检五个 skill",
+      "version": "1.1.0"
     }
   ]
 }

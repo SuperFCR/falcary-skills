@@ -24,7 +24,7 @@ Each folder stands on its own and plugs into Claude Code, Codex, or any agent th
 | [**overleaf-ctl**](overleaf-ctl/) | 1 | Write LaTeX papers with an agent: guarded two-way sync with Overleaf, local compilation, and a Chinese-draft → English-TeX workflow with a log of every writing round. | `1.1.0` |
 | [**paper-writing**](paper-writing/) | 1 | Paper figures: crop your exported PPT/Keynote PDF pages to vector figures, audit them at print width, insert/update them in your `.tex` with captions, and verify the compiled pages (`paper-drawing`). | `0.1.0` |
 | [**pocketrig**](pocketrig/) | 6 | Turn an always-on computer into your AI coding workstation: reach it from your phone and Mac over Tailscale, keep it online 24/7, and run heavy jobs on GPU nodes with the results back on your phone. | `1.0.0` |
-| [**project-memory**](project-memory/) | 5 | Keep what agents learn inside each project: one `.agent-memory/` shared by Claude Code, Codex and every account, plus a live handoff, so you can switch agents or resume after a usage-limit stop. | `1.0.0` |
+| [**project-memory**](project-memory/) | 5 | Keep what agents learn inside each project: one `.agent-memory/` shared by Claude Code, Codex and every account, plus a live handoff, so you can switch agents or resume after a usage-limit stop; preferences you state once are followed in every later session. | `1.1.0` |
 
 More are on the way. Each new skill gets its own folder and a row in this table.
 
@@ -88,6 +88,7 @@ Memory that lives in the project, not in the agent. Switch agents or accounts mi
 
 - **One memory per project.** `.agent-memory/` sits in the project and is shared by Claude Code, Codex and every account. Claude Code loads it natively through `autoMemoryDirectory`; Codex finds it through a short `AGENTS.md` block.
 - **Survives a usage-limit stop.** Hooks write a checkpoint whenever a Claude session stops or fails, and a live handoff tells the next agent what is done and what comes next.
+- **Learns how you work.** Say a preference once ("from now on…", "too long again") and the agent saves it to an always-loaded `## Preferences` list that every agent follows in every later session. Child projects inherit the workspace's list, a broken rule gets sharpened and moved to the top, and with your consent a rule can apply to every project.
 - **Five skills.** Read at session start, learn a lesson on the spot, reflect at the end, hand off at milestones, and keep the memory healthy.
 - **Private by default.** The memory stays out of the project's Git and keeps its own history, so nothing is lost; `--track` shares it with your team.
 
@@ -140,7 +141,7 @@ falcary 的 agent skill 合集。每个顶层文件夹都能独立使用，可�
 | [**overleaf-ctl**](overleaf-ctl/) | 1 | 和 agent 一起写 LaTeX 论文：带保护的 Overleaf 双向同步、本地编译，以及“先写中文稿、再译成英文 TeX”的写作流程，每一轮修改都有记录。 | `1.1.0` |
 | [**paper-writing**](paper-writing/) | 1 | 论文配图（`paper-drawing`）：把你导出的 PPT/Keynote PDF 页面裁成矢量图，按印刷宽度做质量检查，写进 `.tex` 并配 caption，编译后核对页面。 | `0.1.0` |
 | [**pocketrig**](pocketrig/) | 6 | 把一台常开电脑变成 AI 编程工作站：手机和 Mac 经 Tailscale 连接，7×24 在线，重任务交给 GPU 节点，结果回到手机上看。 | `1.0.0` |
-| [**project-memory**](project-memory/) | 5 | 把 agent 学到的东西放进项目本身：Claude Code、Codex 和每个账号共用一个 `.agent-memory/`，附带实时交接，换 agent 或额度用尽中断后都能接着干。 | `1.0.0` |
+| [**project-memory**](project-memory/) | 5 | 把 agent 学到的东西放进项目本身：Claude Code、Codex 和每个账号共用一个 `.agent-memory/`，附带实时交接，换 agent 或额度用尽中断后都能接着干；说过一次的偏好之后每个会话都照做。 | `1.1.0` |
 
 安装 overleaf-ctl：
 
