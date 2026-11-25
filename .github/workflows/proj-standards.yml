@@ -1,0 +1,54 @@
+name: proj-standards
+on:
+  push:
+    paths: ['proj-standards/**', '.github/workflows/proj-standards.yml']
+  pull_request:
+    paths: ['proj-standards/**', '.github/workflows/proj-standards.yml']
+defaults:
+  run:
+    working-directory: proj-standards
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: shellcheck -x install.sh
+      - name: python
+        run: python3 -m py_compile skills/repo-hygiene/scripts/repoguard.py
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: ubuntu-22.04
+            python: '3.9'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: set up Python ${{ matrix.python }}
+        if: matrix.python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: unit tests in temporary HOME and git repos
+        run: |
+          python3 --version
+          git --version
+          python3 - <<'PY'
+          import sys
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover('tests', top_level_dir='.')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          # Make failure details visible in public checks, even without log access.
+          for test, traceback in result.failures + result.errors:
+              message = f'{test}\n{traceback}'
+              message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error title=Unit test failure::{message}', flush=True)
+          sys.exit(not result.wasSuccessful())
+          PY

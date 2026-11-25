@@ -6,10 +6,11 @@
 Each folder stands on its own and plugs into Claude Code, Codex, or any agent that reads `SKILL.md`.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Skills](https://img.shields.io/badge/skills-13-brightgreen.svg)
+![Skills](https://img.shields.io/badge/skills-16-brightgreen.svg)
 ![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-8A2BE2.svg)
 [![pocketrig CI](https://github.com/SuperFCR/falcary-skills/actions/workflows/pocketrig.yml/badge.svg)](https://github.com/SuperFCR/falcary-skills/actions/workflows/pocketrig.yml)
 [![project-memory CI](https://github.com/SuperFCR/falcary-skills/actions/workflows/project-memory.yml/badge.svg)](https://github.com/SuperFCR/falcary-skills/actions/workflows/project-memory.yml)
+[![proj-standards CI](https://github.com/SuperFCR/falcary-skills/actions/workflows/proj-standards.yml/badge.svg)](https://github.com/SuperFCR/falcary-skills/actions/workflows/proj-standards.yml)
 
 **English** · [简体中文](#简体中文)
 
@@ -25,6 +26,7 @@ Each folder stands on its own and plugs into Claude Code, Codex, or any agent th
 | [**paper-writing**](paper-writing/) | 1 | Paper figures: crop your exported PPT/Keynote PDF pages to vector figures, audit them at print width, insert/update them in your `.tex` with captions, and verify the compiled pages (`paper-drawing`). | `0.1.0` |
 | [**pocketrig**](pocketrig/) | 6 | Turn an always-on computer into your AI coding workstation: reach it from your phone and Mac over Tailscale, keep it online 24/7, and run heavy jobs on GPU nodes with the results back on your phone. | `1.0.0` |
 | [**project-memory**](project-memory/) | 5 | Keep what agents learn inside each project: one `.agent-memory/` shared by Claude Code, Codex and every account, plus a live handoff, so you can switch agents or resume after a usage-limit stop; preferences you state once are followed in every later session. | `1.1.0` |
+| [**proj-standards**](proj-standards/) | 3 | Git & repo governance for multi-agent work: Conventional Branch 1.1.0 naming & worktree hygiene, Conventional Commits 1.0.0 + per-milestone atomic commits with shared-tree guards, stage leak/size audits, SemVer releases and zero-dependency hooks (`repoguard`). | `1.0.0` |
 
 More are on the way. Each new skill gets its own folder and a row in this table.
 
@@ -108,6 +110,24 @@ Then ask the agent to "set up project memory" in each project; it runs `pmem` fr
 
 Documentation: [English](project-memory/README.md) · [简体中文](project-memory/README.zh-CN.md)
 
+## ✨ proj-standards
+
+Git branch, commit and repository hygiene enforced consistently across human and AI coding sessions.
+
+- **Conventional Branch 1.1.0.** Validates `<type>/<description>` (`feature`/`feat`, `bugfix`/`fix`, `hotfix`, `release`, `chore`, plus AI agent prefixes `ai`, `claude`, `codex`, `copilot`, `cursor`) on new branches and worktrees while leaving legacy branches untouched.
+- **Milestone atomic commits & shared-tree guards.** Commits each completed module/package cleanly, follows Conventional Commits 1.0.0, checks `git diff --cached` before acting, and isolates shared worktrees with `git commit --only -- <paths>`.
+- **Zero-dependency `repoguard` CLI.** Validates branch names and commit headers, audits staged blobs for secrets, private files (`CLAUDE.local.md`, `.env`) and large weights, computes SemVer tags, and optionally installs POSIX Git hooks.
+
+**Install** as a Claude Code plugin (Python ≥ 3.9 and Git):
+
+```text
+/plugin install proj-standards --marketplace SuperFCR/falcary-skills
+```
+
+For Codex, Antigravity or standalone CLI linking, clone this repository and run `./proj-standards/install.sh --link-cli` (or `--codex` / `--antigravity` / `--target <dir>`).
+
+Documentation: [English](proj-standards/README.md) · [简体中文](proj-standards/README.zh-CN.md)
+
 ## 🗂 Repository layout
 
 ```text
@@ -116,8 +136,9 @@ falcary-skills/
 ├── paper-writing/       # paper-production skills: paper-drawing (figures → cropped PDF → .tex)
 ├── pocketrig/           # six workstation skills, installers for Linux / macOS / Windows, docs
 ├── project-memory/      # five memory skills, the pmem CLI and its installer
-├── .claude-plugin/      # marketplace manifest: installs pocketrig and project-memory as Claude Code plugins
-├── .github/workflows/   # CI for pocketrig and project-memory
+├── proj-standards/      # three Git governance skills (branching, committing, hygiene) & repoguard CLI
+├── .claude-plugin/      # marketplace manifest: installs pocketrig, project-memory and proj-standards
+├── .github/workflows/   # CI for pocketrig, project-memory and proj-standards
 ├── LICENSE
 └── README.md
 ```
@@ -142,6 +163,7 @@ falcary 的 agent skill 合集。每个顶层文件夹都能独立使用，可�
 | [**paper-writing**](paper-writing/) | 1 | 论文配图（`paper-drawing`）：把你导出的 PPT/Keynote PDF 页面裁成矢量图，按印刷宽度做质量检查，写进 `.tex` 并配 caption，编译后核对页面。 | `0.1.0` |
 | [**pocketrig**](pocketrig/) | 6 | 把一台常开电脑变成 AI 编程工作站：手机和 Mac 经 Tailscale 连接，7×24 在线，重任务交给 GPU 节点，结果回到手机上看。 | `1.0.0` |
 | [**project-memory**](project-memory/) | 5 | 把 agent 学到的东西放进项目本身：Claude Code、Codex 和每个账号共用一个 `.agent-memory/`，附带实时交接，换 agent 或额度用尽中断后都能接着干；说过一次的偏好之后每个会话都照做。 | `1.1.0` |
+| [**proj-standards**](proj-standards/) | 3 | Git 与项目工程规范：Conventional Branch 1.1.0 分支与 worktree 治理、Conventional Commits 与里程碑原子提交、共享工作区防误提、`repoguard` 防泄漏与 SemVer 发版。 | `1.0.0` |
 
 安装 overleaf-ctl：
 
@@ -165,4 +187,4 @@ python3 scripts/install.py --link-skill claude --link-cli
 
 之后在每个项目里对 agent 说“给这个项目建记忆”，它会从插件的 skill 目录运行 `pmem`。插件不会把 `pmem` 放到 PATH 上；想自己运行，就链接 agent 第一次 `pmem init` 时装好的稳定副本：`ln -s "${XDG_DATA_HOME:-$HOME/.local/share}/project-memory/pmem.py" ~/.local/bin/pmem`。Codex 或多个 Claude 账号：克隆本仓库后运行 `./project-memory/install.sh --codex --wire`，或 `--config-dir <目录>`（可重复）；加 `--link-cli` 会把 `pmem` 放到 PATH 上。
 
-完整说明见 [overleaf-ctl 中文文档](overleaf-ctl/README.zh-CN.md)、[pocketrig 中文文档](pocketrig/README.zh-CN.md)和 [project-memory 中文文档](project-memory/README.zh-CN.md)。许可：[MIT](LICENSE)。
+完整说明见 [overleaf-ctl 中文文档](overleaf-ctl/README.zh-CN.md)、[pocketrig 中文文档](pocketrig/README.zh-CN.md)、[project-memory 中文文档](project-memory/README.zh-CN.md) 和 [proj-standards 中文文档](proj-standards/README.zh-CN.md)。安装 `proj-standards`（Claude Code 插件）：`/plugin install proj-standards --marketplace SuperFCR/falcary-skills`，或克隆后运行 `./proj-standards/install.sh --link-cli`（支持 `--codex` / `--antigravity`）。许可：[MIT](LICENSE)。

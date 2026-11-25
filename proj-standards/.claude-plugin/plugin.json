@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "proj-standards",
+  "version": "1.0.0",
+  "description": "Project Git & engineering standards for Claude Code, Codex and multi-agent teams: Conventional Branch 1.1.0 naming and worktree hygiene (git-branching), Conventional Commits 1.0.0 with per-milestone atomic commits and shared-workspace commit guards (git-committing), secret/size/private-file stage checks, SemVer releases and zero-dependency hooks via the repoguard CLI (repo-hygiene).",
+  "author": { "name": "SuperFCR" },
+  "homepage": "https://github.com/SuperFCR/falcary-skills/tree/main/proj-standards",
+  "repository": "https://github.com/SuperFCR/falcary-skills",
+  "license": "MIT",
+  "keywords": [
+    "git",
+    "conventional-branch",
+    "conventional-commits",
+    "worktree",
+    "semver",
+    "repo-hygiene",
+    "claude-code",
+    "codex"
+  ],
+  "skills": ["./skills/"]
+}
