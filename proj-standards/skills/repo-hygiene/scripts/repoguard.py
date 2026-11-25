@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 TRUNK_BRANCHES = ("main", "master", "develop")
 PURPOSE_BRANCH_TYPES = ("feature", "feat", "bugfix", "fix", "hotfix", "release", "chore")
@@ -603,6 +603,163 @@ def print_config(kind: str) -> str:
     raise ValueError(f"Unknown config kind: {kind}")
 
 
+def _resolve_base_ref(base_ref: Optional[str], cwd: Optional[Path] = None) -> Optional[str]:
+    if base_ref:
+        if _run_git(["rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}"], cwd=cwd).returncode == 0:
+            return base_ref
+        return None
+    sym = _run_git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], cwd=cwd)
+    candidates: List[str] = []
+    if sym.returncode == 0 and sym.stdout.strip():
+        candidates.append(sym.stdout.strip())
+    candidates.extend(["origin/main", "origin/master", "main", "master", "develop"])
+    for cand in candidates:
+        if _run_git(["rev-parse", "--verify", "--quiet", f"{cand}^{{commit}}"], cwd=cwd).returncode == 0:
+            return cand
+    return None
+
+
+def _rev_counts(left: str, right: str, cwd: Optional[Path] = None) -> Tuple[Optional[int], Optional[int]]:
+    res = _run_git(["rev-list", "--left-right", "--count", f"{left}...{right}"], cwd=cwd)
+    if res.returncode != 0:
+        return None, None
+    parts = res.stdout.strip().split()
+    if len(parts) != 2:
+        return None, None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None, None
+
+
+def worktree_status(
+    base_ref: Optional[str] = None, cwd: Optional[Path] = None
+) -> Tuple[bool, Dict[str, object]]:
+    root = _git_root(cwd)
+    if root is None:
+        return False, {"error": "Not inside a Git repository"}
+
+    gd = _run_git(["rev-parse", "--git-dir"], cwd=root)
+    gcd = _run_git(["rev-parse", "--git-common-dir"], cwd=root)
+    in_linked = False
+    if gd.returncode == 0 and gcd.returncode == 0:
+        gd_path = (root / gd.stdout.strip()).resolve()
+        gcd_path = (root / gcd.stdout.strip()).resolve()
+        in_linked = gd_path != gcd_path
+
+    wt_res = _run_git(["worktree", "list", "--porcelain"], cwd=root)
+    if wt_res.returncode != 0:
+        return False, {"error": wt_res.stderr.strip() or "git worktree list failed"}
+
+    resolved_base = _resolve_base_ref(base_ref, cwd=root)
+    if base_ref and resolved_base is None:
+        return False, {"error": f"Base ref not found: {base_ref}"}
+    base_short = resolved_base.split("/", 1)[-1] if resolved_base and resolved_base.startswith("origin/") else resolved_base
+
+    raw_blocks: List[List[str]] = []
+    curr: List[str] = []
+    for line in wt_res.stdout.splitlines():
+        if not line.strip():
+            if curr:
+                raw_blocks.append(curr)
+                curr = []
+        else:
+            curr.append(line)
+    if curr:
+        raw_blocks.append(curr)
+
+    entries: List[Dict[str, object]] = []
+    for idx, block in enumerate(raw_blocks):
+        wt_path = ""
+        head = ""
+        branch: Optional[str] = None
+        detached = False
+        bare = False
+        locked = False
+        prunable = False
+        for line in block:
+            if line.startswith("worktree "):
+                wt_path = line[len("worktree "):].strip()
+            elif line.startswith("HEAD "):
+                head = line[len("HEAD "):].strip()
+            elif line.startswith("branch "):
+                ref = line[len("branch "):].strip()
+                branch = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+            elif line == "detached":
+                detached = True
+            elif line == "bare":
+                bare = True
+            elif line == "locked" or line.startswith("locked "):
+                locked = True
+            elif line == "prunable" or line.startswith("prunable "):
+                prunable = True
+
+        is_main = idx == 0
+        changed = 0
+        untracked = 0
+        wt_dir = Path(wt_path)
+        if not bare and wt_dir.is_dir():
+            st = _run_git(["status", "--porcelain"], cwd=wt_dir)
+            if st.returncode == 0:
+                for st_line in st.stdout.splitlines():
+                    if st_line.startswith("??"):
+                        untracked += 1
+                    elif st_line.strip():
+                        changed += 1
+        dirty = (changed + untracked) > 0
+
+        upstream: Optional[str] = None
+        up_ahead: Optional[int] = None
+        up_behind: Optional[int] = None
+        if branch:
+            up_res = _run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", f"{branch}@{{upstream}}"], cwd=root)
+            if up_res.returncode == 0 and up_res.stdout.strip():
+                upstream = up_res.stdout.strip()
+                up_ahead, up_behind = _rev_counts(branch, upstream, cwd=root)
+
+        base_ahead: Optional[int] = None
+        base_behind: Optional[int] = None
+        merged_into_base = False
+        if resolved_base and head:
+            base_ahead, base_behind = _rev_counts(head, resolved_base, cwd=root)
+            if not is_main and (branch != base_short or detached):
+                anc = _run_git(["merge-base", "--is-ancestor", head, resolved_base], cwd=root)
+                merged_into_base = anc.returncode == 0
+
+        safe_to_remove = bool(
+            (not is_main) and (not bare) and (not dirty) and (not locked) and (merged_into_base or prunable)
+        )
+        entries.append(
+            {
+                "path": wt_path,
+                "branch": branch,
+                "head": head[:7] if head else "",
+                "detached": detached,
+                "bare": bare,
+                "is_main": is_main,
+                "locked": locked,
+                "prunable": prunable,
+                "dirty": dirty,
+                "changed": changed,
+                "untracked": untracked,
+                "upstream": upstream,
+                "upstream_ahead": up_ahead,
+                "upstream_behind": up_behind,
+                "base_ahead": base_ahead,
+                "base_behind": base_behind,
+                "merged_into_base": merged_into_base,
+                "safe_to_remove": safe_to_remove,
+            }
+        )
+
+    return True, {
+        "base_ref": resolved_base,
+        "in_linked_worktree": in_linked,
+        "count": len(entries),
+        "worktrees": entries,
+    }
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="repoguard",
@@ -645,6 +802,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     p_cfg = sub.add_parser("print-config", help="Print enforcement configuration templates")
     p_cfg.add_argument("kind", choices=("commit-check", "github-ruleset", "proj-standards"))
+
+    p_wt = sub.add_parser("worktree-status", help="Inspect all git worktrees, drift vs base, and safe cleanup state")
+    p_wt.add_argument("--base", default=None, help="Base ref to compare drift/merge state against (default: auto)")
+    p_wt.add_argument("--json", action="store_true", help="Output JSON")
 
     args = parser.parse_args(argv)
     if not args.command:
@@ -768,6 +929,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "print-config":
         sys.stdout.write(print_config(args.kind))
+        return 0
+
+    if args.command == "worktree-status":
+        ok, report = worktree_status(base_ref=args.base)
+        if not ok:
+            print(json.dumps(report) if args.json else report.get("error", "error"), file=sys.stdout if args.json else sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(report))
+        else:
+            base_label = report.get("base_ref") or "-"
+            linked_note = " (inside linked worktree)" if report.get("in_linked_worktree") else ""
+            print(f"Worktrees: {report['count']} | Base: {base_label}{linked_note}")
+            for item in report["worktrees"]:  # type: ignore[index]
+                role = "main-wt" if item["is_main"] else "linked "
+                br = item["branch"] or ("detached@" + item["head"])
+                state = "clean" if not item["dirty"] else f"dirty({item['changed']}M/{item['untracked']}??)"
+                drift = "-"
+                if item["base_ahead"] is not None and item["base_behind"] is not None:
+                    drift = f"+{item['base_ahead']}/-{item['base_behind']}"
+                flags: List[str] = []
+                if item["safe_to_remove"]:
+                    flags.append("merged->removable")
+                elif item["merged_into_base"]:
+                    flags.append("merged")
+                if item["locked"]:
+                    flags.append("locked")
+                if item["prunable"]:
+                    flags.append("prunable")
+                flag_str = f" [{' '.join(flags)}]" if flags else ""
+                print(f"  [{role}] {br:<24} {state:<16} vs-base:{drift:<9} {item['path']}{flag_str}")
         return 0
 
     return 2

@@ -6,21 +6,26 @@
 
 ## Why this package
 
-Teams using Claude Code, Codex, and linked git worktrees hit the same failure modes repeatedly: inconsistent branch casing across macOS/Windows/Linux, huge dirty working trees spanning multiple packages instead of committing each completed milestone, `git add -A` sweeping in another agent's staged work, and leaked `.env` files, local notes (`CLAUDE.local.md`), or multi-megabyte model weights. `proj-standards` pairs three actionable skills with a deterministic stdlib validator.
+Teams using Claude Code, Codex, and linked git worktrees hit the same failure modes repeatedly: inconsistent branch casing across macOS/Windows/Linux, long-lived diverged branches without syncing down `main`, huge dirty working trees spanning multiple packages instead of committing each completed milestone, `git add -A` sweeping in another agent's staged work, and leaked `.env` files, local notes (`CLAUDE.local.md`), or multi-megabyte model weights. `proj-standards` pairs four lightweight skills with a deterministic stdlib validator.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    B["git-branching<br/>Conventional Branch 1.1.0 + worktrees"] --> S["Work in isolated scope"]
-    S --> H["repo-hygiene<br/>repoguard check-stage"]
+    B["git-branching<br/>Conventional Branch 1.1.0"] --> W["git-worktree-sync<br/>parallel desks + sync down main"]
+    W --> H["repo-hygiene<br/>repoguard check-stage"]
     H --> C["git-committing<br/>git commit --only (per milestone)"]
     C --> R["SemVer release<br/>repoguard suggest-version + tag"]
 ```
 
-- **[git-branching](skills/git-branching/SKILL.md)** covers [Conventional Branch 1.1.0](https://conventionalbranch.org) (`feature`/`feat`, `bugfix`/`fix`, `hotfix`, `release`, `chore`, plus AI agent prefixes `ai`, `claude`, `codex`, `copilot`, `cursor`), clear purpose-vs-AI prefix policy, legacy-branch exemption, and safe git worktree creation/cleanup.
+<div align="center">
+<img src="docs/assets/git-worktree-sync-flow.png" alt="Multi-developer Git sync and worktree 3-tier funnel flow" width="820">
+</div>
+
+- **[git-branching](skills/git-branching/SKILL.md)** covers [Conventional Branch 1.1.0](https://conventionalbranch.org) (`feature`/`feat`, `bugfix`/`fix`, `hotfix`, `release`, `chore`, plus AI agent prefixes `ai`, `claude`, `codex`, `copilot`, `cursor`), clear purpose-vs-AI prefix policy, legacy-branch exemption, and safe worktree creation.
+- **[git-worktree-sync](skills/git-worktree-sync/SKILL.md)** keeps multi-developer and multi-agent worktree workflows lightweight: 2-tier trunk flow vs 3-tier funnel (`main` ↔ personal integration tracks ↔ ephemeral local worktrees), 5 daily commands, syncing down `origin/main` to prevent drift, `merge` vs `rebase` boundaries, and safe cleanup.
 - **[git-committing](skills/git-committing/SKILL.md)** enforces atomic commits per completed package/milestone, Conventional Commits 1.0.0, pre-commit `git status` + `git diff --cached` checks, `--only` isolated commits in shared worktrees, and strict approval gates before destructive commands or `git push`.
-- **[repo-hygiene](skills/repo-hygiene/SKILL.md)** keeps machine-local files in `.git/info/exclude`, audits staged blobs/secrets/sizes, computes SemVer bumps from commit history, and ships optional zero-dependency Git hooks plus `commit-check` / GitHub Rulesets templates.
+- **[repo-hygiene](skills/repo-hygiene/SKILL.md)** keeps machine-local files in `.git/info/exclude`, audits staged blobs/secrets/sizes, inspects worktree drift/merge status, computes SemVer bumps from commit history, and ships optional zero-dependency Git hooks plus `commit-check` / GitHub Rulesets templates.
 
 ## Install
 
@@ -48,6 +53,7 @@ Existing skills with the same name are backed up safely to `<target>.bak/<name>-
 
 ```bash
 repoguard check-branch feat/add-auth          # validate branch name (prints suggestion if invalid)
+repoguard worktree-status                     # inspect all worktrees, drift vs main & cleanup readiness
 repoguard check-commit "feat(cli): add flag"  # validate Conventional Commit header
 repoguard check-stage                         # audit staged files for secrets, private files and size
 repoguard suggest-version                     # compute next SemVer tag & changelog draft
@@ -70,6 +76,7 @@ repoguard print-config commit-check           # output CI / GitHub Ruleset / .pr
 | Subcommand | Purpose |
 |---|---|
 | `repoguard check-branch [name]` | Validate current HEAD or given name against Conventional Branch 1.1.0; suggest valid slug on failure |
+| `repoguard worktree-status` | List every linked worktree with dirty state, ahead/behind drift vs base ref, and `merged->removable` readiness |
 | `repoguard check-commit [msg\|--file]` | Validate Conventional Commits 1.0.0 header, ignoring `#` git comments and auto headers unless `--strict` / `--no-git-auto` |
 | `repoguard check-stage` | Catch staged private files (`CLAUDE.local.md`, `.env`, keys), oversized blobs/weights, and added secret tokens |
 | `repoguard suggest-version` | Read commits since latest `vX.Y.Z` tag and output next SemVer (`vMAJOR.MINOR.PATCH`) + changelog bullets |

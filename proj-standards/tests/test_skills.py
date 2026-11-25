@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parent
 SKILLS = ROOT / "skills"
 REPOGUARD = SKILLS / "repo-hygiene" / "scripts" / "repoguard.py"
-EXPECTED_SKILLS = {"git-branching", "git-committing", "repo-hygiene"}
+EXPECTED_SKILLS = {"git-branching", "git-committing", "git-worktree-sync", "repo-hygiene"}
 TEXT_SUFFIXES = {".md", ".py", ".sh", ".json", ".yml", ".yaml", ".txt", ""}
 
 CJK = re.compile(r"[一-鿿]")
@@ -198,7 +198,7 @@ class SkillAndPackageTests(unittest.TestCase):
         self.assertEqual(headings(en), headings(zh))
         for txt in (en, zh):
             self.assertIn("```mermaid", txt)
-            for needle in ("repoguard check-branch", "repoguard check-stage", "repoguard suggest-version", *EXPECTED_SKILLS):
+            for needle in ("repoguard check-branch", "repoguard worktree-status", "repoguard check-stage", "repoguard suggest-version", *EXPECTED_SKILLS):
                 self.assertIn(needle, txt)
         self.assertIn("(README.zh-CN.md)", en)
         self.assertIn("(README.md)", zh)

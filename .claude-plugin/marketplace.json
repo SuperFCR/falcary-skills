@@ -23,8 +23,8 @@
     {
       "name": "proj-standards",
       "source": "./proj-standards",
-      "description": "Git 与项目工程规范：Conventional Branch 1.1.0 分支与 worktree 管理、Conventional Commits 与里程碑原子提交、共享工作区防误提交及仓库卫生校验 CLI（repoguard）；含 git-branching、git-committing、repo-hygiene 三个 skill",
-      "version": "1.0.0"
+      "description": "Git 与项目工程规范：Conventional Branch 1.1.0 分支命名、轻量多人同步与 worktree 生命周期、Conventional Commits 与里程碑原子提交、共享工作区防误提交及仓库卫生校验 CLI（repoguard）；含 git-branching、git-worktree-sync、git-committing、repo-hygiene 四个 skill",
+      "version": "1.1.0"
     }
   ]
 }

@@ -4,7 +4,8 @@
 
 | Skill | 什么时候用 | 典型说法 |
 | --- | --- | --- |
-| [git-branching](git-branching/SKILL.md) | 新建分支、起 git worktree、校验或建议合规分支名、安全清理已合并 worktree | “开个新分支”“按规范起个 worktree”“检查分支名合不合规” |
+| [git-branching](git-branching/SKILL.md) | 新建分支、校验或建议合规分支名、基础 worktree 创建与命名 | “开个新分支”“按规范起个 worktree”“检查分支名合不合规” |
+| [git-worktree-sync](git-worktree-sync/SKILL.md) | 多人协作 2 层/3 层分支同步、多 Agent 并行 worktree 体检、向下吸收 main 与安全拆除 | “多人怎么同步 worktree”“查一下各 worktree 漂移”“合完把旧 worktree 拆了” |
 | [git-committing](git-committing/SKILL.md) | 完成大模块后按包边界原子提交、写 Conventional Commit、多人/多 Agent 共享工作区防误提 | “把这个大 part 提交了”“只提交我的文件，别动暂存区”“整理 commit 历史” |
 | [repo-hygiene](repo-hygiene/SKILL.md) | 提交前扫描私密文件/密钥/大文件、区分 `.gitignore` 与 `.git/info/exclude`、SemVer 发版、安装 hooks/CI | “准备发版算下版本号”“给仓库装 git hooks”“导出 commit-check 配置” |
 

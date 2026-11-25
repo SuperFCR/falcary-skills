@@ -125,4 +125,4 @@ git worktree add -b feat/<task-slug> ../<repo>_wt_<task-slug> <base-branch>
 - 🟡 **做完说明**：将用户口述中含空格/大写/下划线的分支草稿自动清洗成合规 kebab-case 分支名后再创建。
 - 🔴 **必须先问用户**：`git push`（含 `-u` 新建远端分支）、`git branch -D` 强删未合并分支、强制重命名已有远端/协作历史分支、`git worktree remove --force`。
 
-规范来源与署名见 [THIRD_PARTY.md](../../THIRD_PARTY.md)；提交与原子边界规范见 [`git-committing`](../git-committing/SKILL.md)。
+规范来源与署名见 [THIRD_PARTY.md](../../THIRD_PARTY.md)；多人同步与 worktree 生命周期见 [`git-worktree-sync`](../git-worktree-sync/SKILL.md)；提交与原子边界规范见 [`git-committing`](../git-committing/SKILL.md)。

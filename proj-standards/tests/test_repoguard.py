@@ -303,5 +303,88 @@ class SemVerAndConfigTests(unittest.TestCase):
         self.assertIn("allow_branch_types", starter)
 
 
+class WorktreeStatusTests(unittest.TestCase):
+    def test_worktree_status_tracks_drift_dirty_and_merged_cleanup(self):
+        with tempfile.TemporaryDirectory(prefix="rg-wt-") as tmp:
+            base = Path(tmp)
+            repo = init_repo(base / "repo")
+            wt_merged = base / "repo_wt_merged"
+            wt_active = base / "repo_wt_active"
+
+            # Create two linked worktrees from main
+            git(repo, "worktree", "add", "-b", "feat/merged-task", str(wt_merged), "main")
+            git(repo, "worktree", "add", "-b", "feat/active-task", str(wt_active), "main")
+
+            # Commit in wt_merged and merge it into main
+            (wt_merged / "done.txt").write_text("ok\n", encoding="utf-8")
+            git(wt_merged, "add", "done.txt")
+            git(wt_merged, "commit", "-m", "feat(core): finish merged task")
+            git(repo, "merge", "--no-ff", "feat/merged-task", "-m", "merge: feat/merged-task")
+
+            # Advance main once more so wt_active drifts behind, and leave wt_active dirty
+            (repo / "main_advance.txt").write_text("v2\n", encoding="utf-8")
+            git(repo, "add", "main_advance.txt")
+            git(repo, "commit", "-m", "chore: advance main")
+
+            (wt_active / "wip.txt").write_text("wip\n", encoding="utf-8")
+            git(wt_active, "add", "wip.txt")
+            git(wt_active, "commit", "-m", "feat(ui): work in progress")
+            (wt_active / "untracked.tmp").write_text("draft\n", encoding="utf-8")
+
+            ok, rep = repoguard.worktree_status(cwd=repo)
+            self.assertTrue(ok, rep)
+            self.assertEqual(rep["base_ref"], "main")
+            self.assertFalse(rep["in_linked_worktree"])
+            self.assertEqual(rep["count"], 3)
+
+            by_branch = {w["branch"]: w for w in rep["worktrees"]}
+            self.assertTrue(by_branch["main"]["is_main"])
+            self.assertFalse(by_branch["main"]["safe_to_remove"])
+
+            merged_info = by_branch["feat/merged-task"]
+            self.assertTrue(merged_info["merged_into_base"])
+            self.assertFalse(merged_info["dirty"])
+            self.assertTrue(merged_info["safe_to_remove"])
+
+            active_info = by_branch["feat/active-task"]
+            self.assertFalse(active_info["merged_into_base"])
+            self.assertTrue(active_info["dirty"])
+            self.assertEqual(active_info["untracked"], 1)
+            self.assertEqual(active_info["base_ahead"], 1)
+            self.assertGreaterEqual(active_info["base_behind"], 2)
+            self.assertFalse(active_info["safe_to_remove"])
+
+            # Running inside linked worktree reports in_linked_worktree=True & CLI JSON works
+            res_json = subprocess.run(
+                [sys.executable, str(REPOGUARD), "worktree-status", "--json"],
+                cwd=str(wt_active),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res_json.returncode, 0, res_json.stderr)
+            payload = json.loads(res_json.stdout)
+            self.assertTrue(payload["in_linked_worktree"])
+            self.assertEqual(payload["count"], 3)
+
+            res_txt = subprocess.run(
+                [sys.executable, str(REPOGUARD), "worktree-status"],
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res_txt.returncode, 0, res_txt.stderr)
+            self.assertIn("merged->removable", res_txt.stdout)
+            self.assertIn("feat/active-task", res_txt.stdout)
+
+            # Invalid explicit --base fails cleanly
+            res_bad = subprocess.run(
+                [sys.executable, str(REPOGUARD), "worktree-status", "--base", "no-such-ref"],
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(res_bad.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

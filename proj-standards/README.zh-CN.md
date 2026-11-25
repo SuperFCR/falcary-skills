@@ -6,21 +6,26 @@
 
 ## 为什么做这个包
 
-当 Claude Code、Codex 与多个 git worktree 同时在一个团队或个人多仓库体系中工作时，最常反复踩的坑只有几类：分支命名随手写导致跨系统（macOS/Windows 不区分大小写）冲突或 CI 难解析；几个大模块长期堆在工作区一起提交，拆不动也没法按包回退；多会话共享工作区用 `git add -A` 误把别人的改动或已有暂存区吃进本次提交；或者不慎把 `.env`、`CLAUDE.local.md`、模型权重或令牌提交进 Git 历史。`proj-standards` 用 3 个职责正交的 skill 加一个零依赖 Python CLI 把这些护栏固化下来。
+当 Claude Code、Codex 与多个 git worktree 同时在一个团队或个人多仓库体系中工作时，最常反复踩的坑只有几类：分支命名随手写导致跨系统（macOS/Windows 不区分大小写）冲突或 CI 难解析；多人长周期分叉不向下吸收 `main` 导致合并大冲突；几个大模块长期堆在工作区一起提交，拆不动也没法按包回退；多会话共享工作区用 `git add -A` 误把别人的改动或已有暂存区吃进本次提交；或者不慎把 `.env`、`CLAUDE.local.md`、模型权重或令牌提交进 Git 历史。`proj-standards` 用 4 个轻量正交的 skill 加一个零依赖 Python CLI 把这些护栏固化下来。
 
 ## 工作方式
 
 ```mermaid
 flowchart LR
-    B["git-branching<br/>Conventional Branch 1.1.0 + worktree"] --> S["隔离作用域开发"]
-    S --> H["repo-hygiene<br/>repoguard check-stage"]
+    B["git-branching<br/>Conventional Branch 1.1.0"] --> W["git-worktree-sync<br/>并行工作台 + 向下同步 main"]
+    W --> H["repo-hygiene<br/>repoguard check-stage"]
     H --> C["git-committing<br/>git commit --only（按里程碑原子提交）"]
     C --> R["SemVer 发版<br/>repoguard suggest-version + tag"]
 ```
 
-- **[git-branching](skills/git-branching/SKILL.md)**：完整落地 [Conventional Branch 1.1.0](https://conventionalbranch.org/zh/)（`feature`/`feat`、`bugfix`/`fix`、`hotfix`、`release`、`chore`，以及 1.1.0 新增的 AI 来源前缀 `ai`、`claude`、`codex`、`copilot`、`cursor`），明确「多 Agent 接力优先用用途前缀、单 Agent 自主分支用来源前缀、禁止双斜杠叠前缀、仅约束新建分支、历史分支豁免」策略，以及 `git worktree` 安全隔离与清理红线。
+<div align="center">
+<img src="docs/assets/git-worktree-sync-flow.png" alt="多人 Git 同步与 Worktree 三层漏斗横向时间轴" width="820">
+</div>
+
+- **[git-branching](skills/git-branching/SKILL.md)**：完整落地 [Conventional Branch 1.1.0](https://conventionalbranch.org/zh/)（`feature`/`feat`、`bugfix`/`fix`、`hotfix`、`release`、`chore`，以及 1.1.0 新增的 AI 来源前缀 `ai`、`claude`、`codex`、`copilot`、`cursor`），明确「多 Agent 接力优先用用途前缀、单 Agent 自主分支用来源前缀、禁止双斜杠叠前缀、仅约束新建分支、历史分支豁免」策略与基础 worktree 创建。
+- **[git-worktree-sync](skills/git-worktree-sync/SKILL.md)**：轻量级多人同步与 worktree 生命周期规范——区分 2 层主干流与 3 层漏斗流（`main` ↔ 个人主线 ↔ 本机短期并行 worktree）、5 条日常命令、向下吸收 `origin/main` 防漂移、`merge` / `rebase` 边界、多 Agent 防撞与安全拆除。
 - **[git-committing](skills/git-committing/SKILL.md)**：沉淀「每个大 Part / 独立包完成后立即单独 commit」纪律、Conventional Commits 1.0.0 规范、`git status` + `git diff --cached` 前置审计、共享工作区 `git commit --only -- <paths>` 防误提交协议，以及 `git push` / 历史改写先征求确认的红线。
-- **[repo-hygiene](skills/repo-hygiene/SKILL.md)**：区分 `.gitignore` 与 `.git/info/exclude`，拦截私密文件、疑似密钥与大体积权重/文件，按提交历史计算 SemVer 升级与 CHANGELOG 草稿，并支持安装零依赖 Git Hooks 及导出 `commit-check` / GitHub Rulesets 配置。
+- **[repo-hygiene](skills/repo-hygiene/SKILL.md)**：区分 `.gitignore` 与 `.git/info/exclude`，拦截私密文件、疑似密钥与大体积权重/文件，支持 worktree 漂移体检、按提交历史计算 SemVer 升级与 CHANGELOG 草稿，并支持安装零依赖 Git Hooks 及导出 `commit-check` / GitHub Rulesets 配置。
 
 ## 安装
 
@@ -48,6 +53,7 @@ git clone https://github.com/SuperFCR/falcary-skills.git && cd falcary-skills/pr
 
 ```bash
 repoguard check-branch feat/add-auth          # 校验分支名（不合格时自动给出合法建议）
+repoguard worktree-status                     # 体检所有 worktree：脏状态、相对 main 漂移与可安全拆除提示
 repoguard check-commit "feat(cli): add flag"  # 校验 Conventional Commit 标题
 repoguard check-stage                         # 扫描暂存区：私钥/秘钥/私密文件/超大体积
 repoguard suggest-version                     # 根据提交历史推导下一 SemVer tag 与变更摘要
@@ -70,6 +76,7 @@ repoguard print-config commit-check           # 输出 commit-check / GitHub Rul
 | 子命令 | 作用 |
 |---|---|
 | `repoguard check-branch [name]` | 按 Conventional Branch 1.1.0 校验当前 HEAD 或指定分支名，不合格时输出建议名 |
+| `repoguard worktree-status` | 一键查看所有 worktree 的分支、脏状态、相对基准线的 ahead/behind 漂移以及 `merged->removable` 可清理状态 |
 | `repoguard check-commit [msg\|--file]` | 校验 Conventional Commits 1.0.0 标题，自动跳过 `#` 注释与 git 自动提交（可加 `--strict` / `--no-git-auto`） |
 | `repoguard check-stage` | 拦截被误加暂存区的本地私密文件（`CLAUDE.local.md`、`.env`、密钥）、超大文件/权重与新增行密钥字面量 |
 | `repoguard suggest-version` | 读取最近一个 `vX.Y.Z` tag 之后的提交历史，推导下一 SemVer（`vMAJOR.MINOR.PATCH`）并生成发布摘要 |
